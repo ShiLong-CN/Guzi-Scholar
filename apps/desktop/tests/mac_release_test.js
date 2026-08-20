@@ -119,8 +119,11 @@ assert.match(releaseWorkflow, /format\('refs\/tags\/\{0\}', inputs\.release_tag\
 assert.match(releaseWorkflow, /gh release create[\s\S]*--verify-tag/u, 'manual publishing must refuse to synthesize a missing tag');
 assert.match(releaseWorkflow, /Verify packaged runtime boundary[\s\S]*mac_release_test\.js/u);
 assert.match(releaseWorkflow, /Build internal macOS package[\s\S]*dist:mac:internal/u, 'tag builds must remain internal');
-assert.match(releaseWorkflow, /Build signed macOS release package[\s\S]*inputs\.publish_release[\s\S]*dist:mac/u, 'manual publishing must build the signed release target');
-assert.match(releaseWorkflow, /CSC_LINK:.*secrets\.MACOS_CSC_LINK/u);
+assert.match(releaseWorkflow, /Build ad-hoc macOS Preview package[\s\S]*inputs\.publish_release[\s\S]*dist:mac:internal/u, 'manual publishing must build the ad-hoc Preview target');
+assert.doesNotMatch(releaseWorkflow, /MACOS_CSC_LINK|APPLE_APP_SPECIFIC_PASSWORD|APPLE_TEAM_ID/u, 'Preview publishing must not require Apple signing or notarization secrets');
+assert.match(releaseWorkflow, /gh release create[\s\S]*--prerelease[\s\S]*--notes-file release-notes\.md/u, 'Preview releases must be marked pre-release and include explicit notes');
+assert.match(releaseWorkflow, /ad-hoc signing[\s\S]*notarized by Apple/u, 'Preview notes must disclose the signing and notarization status');
+assert.match(releaseWorkflow, /Gatekeeper[\s\S]*right-click \*\*谷子学术\.app\*\*[\s\S]*Open/u, 'Preview notes must include the first-launch Gatekeeper guidance');
 assert.match(releaseWorkflow, /certifi==2025\.8\.3/u);
 assert.doesNotMatch(releaseWorkflow, /^  windows:/mu, 'Windows packaging must remain disabled until its runtime is self-contained');
 

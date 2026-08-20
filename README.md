@@ -21,11 +21,11 @@ English documentation is coming soon. See [README.en.md](README.en.md) for the c
 
 | 平台 | 产物 | 当前状态 |
 | --- | --- | --- |
-| macOS Apple Silicon | `.dmg` | 首要支持平台 |
+| macOS Apple Silicon | `.dmg` | Preview / 内部预览 |
 | Windows x64 | NSIS `.exe` | 等待实机验证 |
 | Windows x64 | 便携版 `.zip` | 等待实机验证 |
 
-macOS 安装包内置 Python、Java 和 OpenDataLoader 运行时。Windows 开发版当前需要 Python 3.9 或更高版本，正式安装包将在实机验证后发布。
+macOS Preview 安装包内置 Python、Java 和 OpenDataLoader 运行时，使用 ad-hoc 签名，尚未通过 Apple Developer ID 签名或 Apple 公证。首次打开时如果遇到 Gatekeeper 提示，请在 Finder 中右键“谷子学术.app”并选择“打开”，再确认提示。当前版本只提供主动检查和浏览器下载，不承诺可靠的应用内自动更新。Windows 开发版当前需要 Python 3.9 或更高版本，正式安装包将在实机验证后发布。
 
 ## 本地开发
 
@@ -47,7 +47,7 @@ npm run verify:windows
 
 Windows 开发启动器位于 `platforms/windows/run-guzi-scholar.cmd`。完整的桌面服务、前端和测试代码位于 `apps/desktop/`。
 
-macOS Release workflow 会自动准备 Temurin JDK 21、Python 3.11、`certifi`、PyInstaller，并下载固定版本的 OpenDataLoader CLI；正式签名和公证仍需要 GitHub Actions 中配置 Apple Developer ID 与公证凭据。
+macOS Preview Release workflow 会自动准备 Temurin JDK 21、Python 3.11、`certifi`、PyInstaller，并下载固定版本的 OpenDataLoader CLI；当前发布使用 ad-hoc 签名，不需要 GitHub Secrets 中的 Apple Developer ID 或公证凭据。未来购买 Apple Developer Program 后，可再启用正式签名和公证路径。
 
 ## 项目结构
 

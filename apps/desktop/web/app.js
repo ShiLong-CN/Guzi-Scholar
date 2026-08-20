@@ -8678,7 +8678,7 @@
     const info = context.app || {};
     if ($('#app-current-version')) $('#app-current-version').textContent = info.version ? `v${info.version}` : '未知';
     if ($('#app-platform-arch')) $('#app-platform-arch').textContent = info.arch === 'arm64' ? 'macOS · Apple Silicon' : `macOS · ${info.arch || '未知架构'}`;
-    if ($('#app-update-channel')) $('#app-update-channel').textContent = info.channel === 'beta' ? '测试版' : String(info.channel || '稳定版');
+    if ($('#app-update-channel')) $('#app-update-channel').textContent = info.channel === 'beta' ? '测试版' : info.channel === 'internal' ? 'Preview / 内部预览' : String(info.channel || '稳定版');
   }
 
   async function loadAppInfo() {
