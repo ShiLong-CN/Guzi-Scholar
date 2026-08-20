@@ -1,0 +1,28 @@
+{
+  "name": "guzi-scholar",
+  "version": "0.1.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "description": "Open-source cross-platform academic PDF reader",
+  "author": "Guzi Scholar",
+  "scripts": {
+    "desktop:dev": "npm --prefix apps/desktop run dev",
+    "desktop:check": "npm --prefix apps/desktop run check",
+    "desktop:check:syntax": "npm --prefix apps/desktop run check:syntax",
+    "build:mac": "npm --prefix apps/desktop run dist:mac:internal",
+    "build:windows": "./platforms/windows/build.sh",
+    "verify:windows": "./platforms/windows/verify-package.sh",
+    "sync": "cap sync",
+    "android:build": "cd android && ./gradlew assembleDebug",
+    "android:install": "cd android && ./gradlew installDebug",
+    "ios:open": "cap open ios"
+  },
+  "dependencies": {
+    "@capacitor/android": "^7.0.0",
+    "@capacitor/core": "^7.0.0",
+    "@capacitor/ios": "^7.0.0"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^7.0.0"
+  }
+}

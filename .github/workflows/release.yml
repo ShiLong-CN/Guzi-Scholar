@@ -1,0 +1,111 @@
+name: Release desktop packages
+
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  macos:
+    name: Build macOS arm64
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Install macOS build helpers
+        run: python3 -m pip install --disable-pip-version-check certifi
+      - name: Install desktop dependencies
+        run: npm ci --prefix apps/desktop
+      - name: Check shared desktop code
+        run: npm run desktop:check:syntax
+      - name: Download and verify OpenDataLoader CLI
+        shell: bash
+        run: |
+          jar_path="$(zsh apps/desktop/scripts/fetch-opendataloader.sh)"
+          echo "MY_SCHOLAR_ODL_JAR=$jar_path" >> "$GITHUB_ENV"
+          echo "MY_SCHOLAR_ODL_SHA256=104a5523c812ba3a43a3c7dd6156e33f23d0e32f03ef1ac629009ef96d7a79e1" >> "$GITHUB_ENV"
+          echo "MY_SCHOLAR_BUILD_PYTHON=$(command -v python3)" >> "$GITHUB_ENV"
+          echo "MY_SCHOLAR_JAVA_HOME=$JAVA_HOME" >> "$GITHUB_ENV"
+      - name: Build internal macOS DMG
+        run: npm --prefix apps/desktop run dist:mac:internal
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: guzi-scholar-macos-arm64
+          path: apps/desktop/dist/mac.noindex/*.dmg
+          if-no-files-found: error
+
+  windows:
+    name: Build Windows x64
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: windows-2022
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install desktop dependencies
+        run: npm ci --prefix apps/desktop
+      - name: Check shared desktop code
+        run: npm run desktop:check:syntax
+      - name: Build Windows installer and portable package
+        shell: pwsh
+        working-directory: platforms/windows
+        run: >-
+          ../../apps/desktop/node_modules/.bin/electron-builder.cmd
+          --win --x64 --config electron-builder.win.json
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: guzi-scholar-windows-x64
+          path: |
+            platforms/windows/dist/*.exe
+            platforms/windows/dist/*.zip
+          if-no-files-found: error
+
+  publish:
+    name: Publish one GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download macOS artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: guzi-scholar-macos-arm64
+          path: release
+      - name: Generate SHA-256 checksums
+        working-directory: release
+        run: sha256sum * > SHA256SUMS
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${GITHUB_REF_NAME}" release/* --repo "${GITHUB_REPOSITORY}" --generate-notes --title "Guzi Scholar ${GITHUB_REF_NAME}"

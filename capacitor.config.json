@@ -1,0 +1,18 @@
+{
+  "appId": "com.guzi.scholar",
+  "appName": "谷子学术",
+  "webDir": "mobile-shell",
+  "server": {
+    "url": "https://guzilab.com",
+    "cleartext": false,
+    "androidScheme": "https"
+  },
+  "android": {
+    "allowMixedContent": false,
+    "backgroundColor": "#f5f7f8"
+  },
+  "ios": {
+    "contentInset": "always",
+    "backgroundColor": "#f5f7f8"
+  }
+}

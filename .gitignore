@@ -1,0 +1,55 @@
+# Installed dependencies and build output
+node_modules/
+dist/
+out/
+
+# User-owned runtime state
+data/
+.backups/
+*.log
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+config.local.json
+developer.tokens.json
+deploy/tencent/account.env
+deploy/tencent/ai.tokens.json
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Platform build output
+platforms/windows/dist/
+apps/desktop/build/
+apps/desktop/dist/
+*.dmg
+*.pkg
+macos/resources/dmg-background.tiff
+webseit/demo-sources/
+
+# Local-only QA and agent planning records
+QA_REPORT.md
+docs/superpowers/
+
+# Python, test and editor caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+*.tmp
+*.swp
+.DS_Store
+
+# Mobile build output and local toolchain paths
+android/build/
+android/app/build/
+android/.gradle/
+android/local.properties
+android/dist/
+ios/App/Pods/
+ios/App/build/
+ios/DerivedData/
+mobile-shell/

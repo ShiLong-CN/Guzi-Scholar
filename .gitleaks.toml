@@ -1,0 +1,9 @@
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Generated desktop build and packaging output; these paths are gitignored and scanned separately before release"
+paths = [
+  '''^apps/desktop/build/''',
+  '''^apps/desktop/dist/'''
+]

@@ -1,0 +1,12 @@
+{
+  "translation": {
+    "base_url": "https://translation-gateway.example/v1",
+    "api_key": "replace-with-local-secret",
+    "model": "translation-model"
+  },
+  "chat": {
+    "base_url": "https://chat-gateway.example/v1",
+    "api_key": "replace-with-local-secret",
+    "model": "chat-model"
+  }
+}

@@ -1,0 +1,52 @@
+[Unit]
+Description=Guzi Scholar authenticated AI gateway
+After=network-online.target guzi-scholar-account.service
+Wants=network-online.target
+Requires=guzi-scholar-account.service
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=guzi-account
+Group=guzi-account
+UMask=0077
+WorkingDirectory=/opt/guzi-scholar/current/account
+Environment=MY_SCHOLAR_DEVELOPER_TOKENS_FILE=/etc/guzi-scholar/ai.tokens.json
+ExecStartPre=/usr/local/sbin/guzi-scholar-db-verify /var/lib/guzi-scholar/account/users.db
+ExecStartPre=/usr/local/sbin/guzi-scholar-ai-config-verify /etc/guzi-scholar/ai.tokens.json
+ExecStart=/usr/bin/python3 -B /opt/guzi-scholar/current/account/ai_gateway.py serve --db /var/lib/guzi-scholar/account/users.db --host 127.0.0.1 --port 8480
+Restart=on-failure
+RestartSec=3s
+TimeoutStartSec=30s
+TimeoutStopSec=130s
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/guzi-scholar/account
+ReadOnlyPaths=/etc/guzi-scholar/ai.tokens.json
+PrivateTmp=true
+PrivateDevices=true
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectClock=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+SocketBindDeny=any
+SocketBindAllow=tcp:8480
+TasksMax=128
+MemoryMax=512M
+LimitNOFILE=4096
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,45 @@
+{
+  "appId": "com.guzi.scholar",
+  "productName": "谷子学术",
+  "copyright": "Guzi Scholar",
+  "electronVersion": "43.2.0",
+  "directories": {
+    "app": "../../apps/desktop",
+    "output": "dist"
+  },
+  "asar": false,
+  "files": [
+    "electron/**/*",
+    "web/**/*",
+    "*.py",
+    "scripts/**/*.py",
+    "config.example.json",
+    "package.json",
+    "!**/__pycache__/**",
+    "!data/**",
+    "!tests/**",
+    "!docs/**",
+    "!node_modules/**",
+    "!developer.tokens.json",
+    "!config.local.json"
+  ],
+  "extraMetadata": {
+    "name": "guzi-scholar",
+    "main": "electron/main.cjs"
+  },
+  "win": {
+    "icon": "assets/icon.ico",
+    "target": [
+      { "target": "nsis", "arch": ["x64"] },
+      { "target": "zip", "arch": ["x64"] }
+    ]
+  },
+  "nsis": {
+    "oneClick": false,
+    "perMachine": false,
+    "allowToChangeInstallationDirectory": true,
+    "createDesktopShortcut": true,
+    "createStartMenuShortcut": true,
+    "shortcutName": "谷子学术"
+  }
+}

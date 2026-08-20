@@ -1,0 +1,495 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>谷子学术 · 本地论文阅读器</title>
+  <link rel="icon" type="image/png" href="/web/assets/app-icon.png">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <meta name="theme-color" content="#b45309" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#17191c" media="(prefers-color-scheme: dark)">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="谷子学术">
+  <link rel="apple-touch-icon" href="/web/assets/apple-touch-icon.png">
+  <link rel="stylesheet" href="/web/styles.css">
+</head>
+<body>
+  <header class="app-header">
+    <button id="mobile-sidebar-toggle" class="mobile-sidebar-toggle" type="button" aria-label="打开文件夹与视图" aria-expanded="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"></path></svg></button>
+    <div class="brand-mark" aria-label="谷子学术"><picture class="brand-glyph-frame"><source media="(prefers-color-scheme: dark)" srcset="/web/assets/brand-glyph-dark-96.png"><img class="brand-glyph" src="/web/assets/brand-glyph-96.png" alt=""></picture><span>谷子学术</span></div>
+    <nav class="top-nav" aria-label="主导航">
+      <button class="nav-button active" data-view="library-view" type="button">文献库 <span id="library-count" class="nav-count">0</span></button>
+    </nav>
+    <div id="document-tabs" class="document-tabs header-document-tabs" role="tablist" aria-label="已打开文档" hidden></div>
+    <div class="header-spacer"></div>
+    <button id="install-app-button" class="nav-button" type="button" hidden>安装应用</button>
+    <button class="nav-button nav-settings" data-view="settings-view" type="button">设置</button>
+  </header>
+
+  <main class="app-shell">
+    <section id="library-view" class="view active-view">
+      <div class="library-layout">
+        <aside class="library-sidebar" aria-label="文献文件夹">
+          <div class="library-sidebar-heading"><strong>文件夹</strong><button id="create-folder-button" class="tiny-icon-button" type="button" title="新建文件夹">＋</button></div>
+          <div id="folder-tree" class="folder-tree"></div>
+          <div class="library-sidebar-divider"></div>
+          <div class="library-sidebar-heading"><strong>系统</strong></div>
+          <div id="library-system-filters" class="system-filter-list">
+            <button class="system-filter active" data-library-folder="system-all" type="button"><svg class="sidebar-item-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 7v14"></path><path d="M3 18a1 1 0 0 1-1-1V5a2 2 0 0 1 2-2h5a3 3 0 0 1 3 3v15a3 3 0 0 0-3-3Z"></path><path d="M21 18a1 1 0 0 0 1-1V5a2 2 0 0 0-2-2h-5a3 3 0 0 0-3 3v15a3 3 0 0 1 3-3Z"></path></svg><span class="system-filter-label">全部文献</span><b data-folder-count="system-all">0</b></button>
+            <button class="system-filter" data-library-folder="system-unfiled" type="button"><svg class="sidebar-item-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M22 12h-6l-2 3h-4l-2-3H2"></path><path d="m5.45 5.11-3.24 6.48A2 2 0 0 0 2 12.47V19a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6.53a2 2 0 0 0-.21-.89l-3.24-6.48A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11Z"></path></svg><span class="system-filter-label">未分类</span><b data-folder-count="system-unfiled">0</b></button>
+            <button class="system-filter" data-library-folder="system-trash" type="button"><svg class="sidebar-item-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M3 6h18"></path><path d="M8 6V4c0-1 .9-2 2-2h4c1.1 0 2 1 2 2v2"></path><path d="m19 6-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path><path d="M10 11v6M14 11v6"></path></svg><span class="system-filter-label">回收站</span><b data-folder-count="system-trash">0</b></button>
+          </div>
+          <div class="library-sidebar-divider"></div>
+          <div class="library-sidebar-heading"><strong>视图</strong><button id="manage-views-button" class="tiny-button" type="button">管理</button></div>
+          <div id="sidebar-views-list" class="system-filter-list"></div>
+          <div class="library-sidebar-divider"></div>
+          <div class="library-sidebar-heading library-grouping-heading"><strong>分类</strong><button id="grouping-button" class="grouping-select-button" type="button" aria-haspopup="listbox" aria-controls="grouping-field-menu" aria-expanded="false">阅读状态⌄</button></div>
+          <div id="library-grouping-list" class="library-grouping-list" role="group" aria-label="文献分类"></div>
+        </aside>
+        <main class="library-main">
+          <div class="library-main-heading">
+            <div><div class="eyebrow">LOCAL LIBRARY</div><h1 id="library-heading">全部文献</h1><p id="library-subtitle" class="library-subtitle">本机保存 · HTML 连续阅读</p></div>
+            <div id="library-list-actions" class="library-main-actions"><label class="search-box"><span>⌕</span><input id="library-search" type="search" placeholder="搜索名称、标题或标签"></label><select id="library-sort" aria-label="文献排序"><option value="updated_at-desc">最近更新</option><option value="created_at-desc">最近加入</option><option value="title-asc">标题 A–Z</option><option value="importance-desc">重要程度</option></select><button id="columns-button" class="secondary-button compact-button" type="button">列设置</button><button id="import-pdf-button" class="primary-button compact-button" type="button">导入 PDF</button></div>
+            <div id="library-graph-actions" class="library-main-actions graph-header-actions" hidden><label class="search-box"><span>⌕</span><input id="graph-search" type="search" placeholder="搜索图谱中的文献"></label><button id="graph-fit-button" class="secondary-button compact-button" type="button">适应画布</button></div>
+          </div>
+          <div id="library-list-surface">
+            <input id="file-input" type="file" accept="application/pdf,.pdf" multiple hidden>
+            <div id="drop-overlay" class="drop-overlay" hidden><strong>拖放 PDF 到这里</strong><span>支持一次导入多篇论文</span></div>
+            <section id="progress-card" class="progress-card import-queue-card" hidden>
+              <div class="progress-head"><span id="progress-stage">导入队列</span><span id="progress-value">0%</span></div>
+              <div class="progress-track"><div id="progress-bar" class="progress-bar"></div></div>
+              <div id="progress-detail" class="progress-detail">正在准备本地转换器…</div>
+              <div id="import-queue-list" class="import-queue-list"></div>
+            </section>
+            <div id="upload-error" class="inline-error" role="alert" hidden></div>
+            <div id="library-columns" class="library-columns" role="row" aria-label="文献列设置"></div>
+            <div id="recent-list" class="library-list"><div class="empty-state">还没有转换任务。拖入一份 PDF 开始。</div></div>
+          </div>
+          <section id="library-graph-surface" class="library-graph-surface" aria-label="文献关系图谱" hidden>
+            <div class="graph-toolbar" aria-label="图谱显示设置">
+              <div class="graph-toolbar-group" role="group" aria-label="关系类型">
+                <label class="graph-toggle graph-similarity-switch" title="显示或隐藏文献之间的内容相似虚线"><input id="graph-toggle-similarity" type="checkbox" role="switch"><span class="graph-switch-track" aria-hidden="true"></span><span>内容相似</span></label>
+                <label class="graph-toggle"><input id="graph-toggle-attributes" type="checkbox" checked><span>属性节点</span></label>
+              </div>
+              <details class="graph-property-picker">
+                <summary>关系属性</summary>
+                <div id="graph-property-options" class="graph-property-options"></div>
+              </details>
+              <label class="graph-zoom-control"><span>图谱缩放</span><input id="graph-zoom" type="range" min="60" max="130" step="5" value="85" aria-label="图谱缩放" aria-valuetext="85%"><output id="graph-zoom-value" for="graph-zoom">85%</output></label>
+              <span class="graph-drag-hint">拖动节点整理关系 · 悬浮文献查看完整标题</span>
+              <div id="graph-stats" class="graph-stats" role="status" aria-live="polite"></div>
+            </div>
+            <div class="graph-stage">
+              <div id="library-graph-canvas" class="library-graph-canvas" role="img" aria-label="文献关系网络；可以拖动画布、缩放、选择和拖动节点，并悬浮文献查看完整标题"></div>
+              <div id="library-graph-empty" class="graph-empty" hidden></div>
+              <div class="graph-legend" aria-label="图例">
+                <span><i class="legend-node legend-paper"></i>文献</span>
+                <span><i class="legend-node legend-attribute"></i>属性</span>
+                <span><i class="legend-line legend-property"></i>属性关系</span>
+                <span><i class="legend-line legend-similarity"></i>内容相似</span>
+              </div>
+            </div>
+            <details class="graph-accessible-results">
+              <summary>键盘可访问的节点列表 · <span id="graph-accessible-summary">等待图谱</span></summary>
+              <div id="graph-accessible-list" class="graph-accessible-list"></div>
+            </details>
+          </section>
+        </main>
+        <aside id="library-details" class="library-details" aria-label="文献详情"></aside>
+        <div id="library-scrim" class="library-scrim" hidden></div>
+      </div>
+    </section>
+
+    <section id="views-view" class="view" hidden>
+      <div class="views-layout">
+        <aside class="views-sidebar"><button id="views-back-button" class="views-back-button" type="button">‹ 返回文献库</button><div class="views-sidebar-heading"><div><div class="eyebrow">SAVED VIEWS</div><h2>视图管理</h2></div><button id="create-view-button" class="tiny-icon-button" type="button" title="新建视图">＋</button></div><div id="saved-views-list" class="saved-views-list"></div><div class="views-sidebar-divider"></div><div class="property-heading"><strong>属性</strong><button id="create-property-button" class="tiny-button" type="button">新增属性</button></div><div id="properties-list" class="properties-list"></div></aside>
+        <main class="view-editor"><div class="library-main-heading"><div><div class="eyebrow">FILTERED READING SET</div><h1 id="view-editor-title">全部文献</h1><p class="library-subtitle">视图用于呈现文献分类，不会改变文献库导航。</p></div></div><section class="view-results-card"><div class="view-results-heading"><strong id="view-results-label">当前视图文献</strong><span id="view-results-count"></span></div><div id="view-results" class="library-list"><div class="empty-state">选择一个视图开始。</div></div></section><form id="view-form" class="view-form"><label>视图名称<input id="view-name" type="text" maxlength="80" placeholder="例如：待读 · 视觉语言"></label><div class="filter-builder"><div class="filter-builder-heading"><strong>筛选条件</strong><button id="add-filter-button" class="tiny-button" type="button">添加条件</button></div><div id="view-filters" class="view-filters"><div class="empty-state">没有筛选条件，视图将显示全部文献。</div></div></div><div class="view-form-actions"><button id="save-view-button" class="primary-button compact-button" type="submit">保存视图</button><button id="delete-view-button" class="secondary-button" type="button">删除视图</button><span id="view-status" class="panel-status" hidden></span></div></form></main>
+      </div>
+    </section>
+
+    <section id="reader-view" class="view" hidden>
+      <div class="reader-action-bar">
+        <div class="reader-heading">
+          <button id="assistant-toggle" class="toolbar-icon-button assistant-toggle" type="button" title="打开阅读助手" aria-label="打开阅读助手" aria-controls="reader-sidebar" aria-expanded="false"><svg class="assistant-toggle-icon" aria-hidden="true" focusable="false" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"></rect><path d="M8 4v16"></path><path d="M12 9h5M12 12h4M12 15h5"></path></svg><span class="assistant-toggle-label">阅读助手</span></button>
+          <button id="reader-info-button" class="toolbar-icon-button" type="button" title="文档信息" aria-label="文档信息">ⓘ</button>
+        </div>
+        <div class="reader-actions" aria-label="阅读动作">
+          <button id="full-translate-button" class="action-button" type="button"><span class="action-icon">文</span>全文翻译</button>
+          <button id="reflow-button" class="action-button" type="button"><span class="action-icon">✧</span><span id="reflow-button-label">AI 重排</span></button>
+          <button id="auto-highlight-button" class="action-button" type="button"><span class="action-icon">✦</span>重点高亮</button>
+          <div class="typography-control">
+            <button id="typography-button" class="action-button" type="button" aria-expanded="false" aria-controls="typography-popover"><span class="action-icon">Aa</span>文字</button>
+          </div>
+          <button id="share-button" class="action-button" type="button"><span class="action-icon">↗</span>分享</button>
+        </div>
+        <div id="reader-progress-track" class="reader-progress-track" role="progressbar" aria-label="阅读进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="reader-progress-bar" class="reader-progress-bar"></div></div>
+      </div>
+      <div id="reader-overlay-layer" class="reader-overlay-layer">
+        <div id="typography-popover" class="typography-popover" role="dialog" aria-label="阅读文字设置" hidden>
+          <label><span>字号</span><input id="font-size-range" type="range" min="70" max="200" step="1" value="100"><span class="typography-number-control"><input id="font-size-value" type="number" min="70" max="200" step="1" value="100" inputmode="numeric" aria-label="字号百分比"><span aria-hidden="true">%</span></span></label>
+          <label><span>行距</span><input id="line-height-range" type="range" min="100" max="300" step="1" value="172"><span class="typography-number-control"><input id="line-height-value" type="number" min="100" max="300" step="1" value="172" inputmode="numeric" aria-label="行距百分比"><span aria-hidden="true">%</span></span></label>
+          <label><span>页边距</span><input id="page-margin-range" type="range" min="0" max="250" step="1" value="100"><span class="typography-number-control"><input id="page-margin-value" type="number" min="0" max="250" step="1" value="100" inputmode="numeric" aria-label="页边距百分比"><span aria-hidden="true">%</span></span></label>
+          <button id="typography-reset" class="tiny-button" type="button">恢复默认</button>
+        </div>
+      </div>
+      <div id="translation-progress" class="translation-progress" hidden>
+        <span class="translation-progress-dots" aria-hidden="true"><span></span><span></span><span></span></span>
+        <div class="translation-progress-main">
+          <div class="translation-progress-head">
+            <span id="translation-progress-label">全文翻译准备中</span>
+            <span id="translation-progress-count" class="translation-progress-count"></span>
+            <span id="translation-progress-value">0%</span>
+          </div>
+          <div class="translation-progress-track" role="progressbar" aria-label="全文翻译进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="translation-progress-bar" class="translation-progress-bar"></div></div>
+          <div id="translation-progress-detail" class="translation-progress-detail" hidden></div>
+        </div>
+        <button id="stop-translation-button" class="tiny-button" type="button">停止</button>
+      </div>
+      <div id="reflow-progress" class="translation-progress reflow-progress" role="status" aria-live="polite" hidden>
+        <span class="translation-progress-dots" aria-hidden="true"><span></span><span></span><span></span></span>
+        <div class="translation-progress-main">
+          <div class="translation-progress-head">
+            <span id="reflow-progress-label">AI 重排准备中</span>
+            <span id="reflow-progress-stage" class="translation-progress-count"></span>
+            <span id="reflow-progress-value">0%</span>
+          </div>
+          <div id="reflow-progress-track" class="translation-progress-track" role="progressbar" aria-label="AI 重排进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="reflow-progress-bar" class="translation-progress-bar"></div></div>
+        </div>
+      </div>
+      <div class="reader-grid">
+        <aside id="reader-sidebar" class="reader-sidebar" aria-label="阅读助手" aria-hidden="true">
+          <button id="reader-sidebar-resizer" class="reader-sidebar-resizer" type="button" role="separator" aria-label="调整阅读助手宽度" aria-orientation="vertical" aria-controls="reader-sidebar" aria-valuemin="320" aria-valuemax="620" aria-valuenow="380"></button>
+          <div class="sidebar-caption"><span class="sidebar-caption-mark">MS</span><span>阅读助手</span></div>
+          <div class="sidebar-tabs" role="tablist" aria-label="阅读助手">
+            <button class="sidebar-tab active" data-panel="chat-panel" type="button">AI 问答</button>
+            <button class="sidebar-tab" data-panel="outline-panel" type="button">目录</button>
+            <button class="sidebar-tab" data-panel="highlights-panel" type="button">阅读重点</button>
+            <button class="sidebar-tab" data-panel="annotations-panel" type="button">高亮笔记</button>
+            <button class="sidebar-tab" data-panel="notes-panel" type="button">我的笔记</button>
+            <button id="quick-preview-tab" class="sidebar-tab" data-panel="quick-preview-panel" type="button" hidden>快速预览</button>
+          </div>
+          <section id="chat-panel" class="sidebar-panel active-panel">
+            <div class="chat-session-toolbar">
+              <button id="open-chat-history" class="chat-session-switcher" type="button" aria-controls="chat-history-view" aria-expanded="false" aria-haspopup="menu" title="单击切换历史会话；右键管理当前会话"><span id="chat-current-session-title">文章助手</span><span class="chat-session-chevron" aria-hidden="true">⌄</span></button>
+              <button id="new-chat-session" class="tiny-button" type="button">＋ 新会话</button>
+            </div>
+            <div id="chat-conversation-view" class="chat-subview">
+              <div class="panel-intro"><strong>文章助手</strong><span>选中正文后会自动附为上下文，随提问一起发送</span></div>
+              <div id="chat-messages" class="chat-messages"><div class="chat-empty">可以问我：这篇文章的贡献是什么？表格中的指标如何比较？</div></div>
+              <div id="selected-context" class="selected-context" hidden></div>
+              <form id="chat-form" class="chat-form"><textarea id="chat-input" rows="3" placeholder="针对当前文章提问…（Enter 发送，⌘ Enter 换行）"></textarea><button class="primary-button" type="submit">发送 <span>Enter</span></button></form>
+              <div id="chat-status" class="panel-status" hidden></div>
+            </div>
+            <div id="chat-history-view" class="chat-subview" aria-hidden="true" hidden>
+              <div class="panel-intro"><strong>历史会话</strong><span id="chat-history-count">当前文章的问答记录</span></div>
+              <div id="chat-history-list" class="chat-history-list" role="list"></div>
+            </div>
+            <dialog id="chat-session-rename-dialog" class="chat-session-rename-dialog">
+              <form method="dialog">
+                <label for="chat-session-title-input">重命名会话</label>
+                <input id="chat-session-title-input" type="text" maxlength="80" autocomplete="off">
+                <div class="chat-session-dialog-actions"><button type="button" class="tiny-button" data-chat-session-rename-cancel>取消</button><button id="confirm-chat-session-rename" class="primary-button" type="submit">保存</button></div>
+              </form>
+            </dialog>
+          </section>
+          <section id="outline-panel" class="sidebar-panel" hidden><div class="panel-intro"><strong>目录</strong><span>按章节快速定位</span></div><div id="outline-list" class="outline-list"><div class="chat-empty">打开文档后生成目录。</div></div></section>
+          <section id="highlights-panel" class="sidebar-panel" hidden>
+            <div class="panel-intro"><strong>阅读重点</strong><span id="highlight-ai-status">AI 建议，仅供参考 · 点击可采纳或忽略</span></div>
+            <div class="highlight-filters" role="group" aria-label="重点类型">
+              <button class="highlight-filter active" data-highlight-filter="all" type="button">全部</button>
+              <button class="highlight-filter" data-highlight-filter="research_goal" type="button">研究目标</button>
+              <button class="highlight-filter" data-highlight-filter="method" type="button">研究方法</button>
+              <button class="highlight-filter" data-highlight-filter="conclusion" type="button">主要结论</button>
+              <button class="highlight-filter" data-highlight-filter="innovation" type="button">创新点</button>
+            </div>
+            <div id="highlights-list" class="highlights-list"><div class="chat-empty">打开文章后自动识别阅读重点。</div></div>
+          </section>
+          <section id="annotations-panel" class="sidebar-panel" hidden><div class="panel-intro annotations-panel-header"><div class="annotations-panel-heading"><strong>高亮笔记</strong><span id="annotation-count">0 条笔记</span></div><button id="clear-annotations-button" class="tiny-button danger-button" type="button" disabled>清空全部标注</button></div><div id="annotations-list" class="annotations-list"><div class="chat-empty">还没有添加笔记。正文中的高亮和划线仍会保留。</div></div></section>
+          <section id="notes-panel" class="sidebar-panel" hidden>
+            <div class="panel-intro"><strong>文章笔记</strong><span>直接编辑与排版 · 自动保存到本机</span></div>
+            <div class="notes-tools" role="toolbar" aria-label="文章笔记格式">
+              <button class="notes-format-button" type="button" data-format="bold" title="加粗（⌘B）" aria-label="加粗"><strong>B</strong></button>
+              <button class="notes-format-button" type="button" data-format="italic" title="斜体（⌘I）" aria-label="斜体"><em>I</em></button>
+              <button class="notes-format-button notes-format-wide" type="button" data-format="unordered-list" title="项目列表" aria-label="项目列表">• 列表</button>
+              <button class="notes-format-button notes-format-wide" type="button" data-format="ordered-list" title="编号列表" aria-label="编号列表">1. 列表</button>
+              <button class="notes-format-button notes-format-wide" type="button" data-format="blockquote" title="引用" aria-label="引用">引用</button>
+              <button id="insert-image-button" class="notes-format-button notes-format-wide" type="button" title="插入图片" aria-label="插入图片">图片</button>
+              <input id="note-image-input" type="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden>
+              <button id="save-notes-button" class="tiny-button notes-save-button" type="button">保存</button>
+              <span id="notes-saved" class="saved-state" role="status" aria-live="polite"></span>
+            </div>
+            <div id="notes-editor" class="notes-editor is-empty" contenteditable="true" role="textbox" aria-label="文章笔记内容" aria-multiline="true" spellcheck="true" data-placeholder="记录想法、引用和后续实验…"></div>
+          </section>
+          <section id="quick-preview-panel" class="sidebar-panel" hidden>
+            <div class="panel-intro quick-preview-heading"><div><strong>快速预览</strong><span id="quick-preview-subtitle">图表与参考文献不会打断阅读位置</span></div><button id="close-quick-preview" class="tiny-button" type="button" aria-label="关闭快速预览">关闭</button></div>
+            <div id="quick-preview-content" class="quick-preview-content"><div class="chat-empty">点击正文中的图片、表格或参考文献索引即可预览。</div></div>
+          </section>
+        </aside>
+        <div class="reader-frame-wrap">
+          <nav id="reader-chapter-rail" class="reader-chapter-rail" aria-label="章节导航" hidden>
+            <button id="reader-chapter-rail-toggle" class="reader-chapter-rail-toggle" type="button" aria-expanded="false" aria-controls="reader-chapter-list" title="章节导航"><span class="reader-chapter-rail-icon" aria-hidden="true"><i></i><i></i><i></i></span><span class="reader-chapter-rail-label">章节</span></button>
+            <div id="reader-chapter-list" class="reader-chapter-list" role="list"></div>
+            <div id="reader-chapter-tooltip" class="reader-chapter-tooltip" role="tooltip" hidden></div>
+          </nav>
+          <iframe id="html-preview" title="论文阅读器" loading="eager"></iframe>
+          <div id="selection-popover" class="selection-popover" hidden>
+            <div class="selection-actions" role="toolbar" aria-label="选中文本操作">
+              <button id="selection-highlight" type="button">高亮</button>
+              <button id="selection-highlight-note" type="button">高亮笔记</button>
+              <button id="selection-underline" type="button">划线</button>
+              <button id="selection-underline-note" type="button">划线随笔</button>
+              <button id="selection-add-chat" type="button">加入 Chat</button>
+            </div>
+            <div id="selection-translation-result" class="selection-translation-result" role="status" aria-live="polite" aria-atomic="true"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="settings-view" class="view" hidden>
+      <div class="settings-product">
+        <aside class="settings-navigation" aria-label="设置分类">
+          <div class="settings-navigation-heading"><strong>设置分类</strong><span>按模块调整偏好</span></div>
+          <nav class="settings-navigation-links" aria-label="设置页面目录">
+            <a class="active" href="#settings-reading" aria-current="location"><span class="settings-navigation-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.5"></circle><path d="M12 2.5v2M12 19.5v2M4.5 12h-2M21.5 12h-2M5.3 5.3l1.4 1.4M17.3 17.3l1.4 1.4M18.7 5.3l-1.4 1.4M6.7 17.3l-1.4 1.4"></path></svg></span><span>外观与阅读</span></a>
+            <a href="#settings-shortcuts"><span class="settings-navigation-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="3"></rect><path d="M7 9h.01M11 9h.01M15 9h.01M18 9h.01M7 13h.01M11 13h.01M15 13h3M7 16h10"></path></svg></span><span>快捷键</span></a>
+            <a href="#settings-metadata"><span class="settings-navigation-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H11a3 3 0 0 1 3 3v15a3 3 0 0 0-3-3H6.5A2.5 2.5 0 0 0 4 20.5z"></path><path d="M20 5.5A2.5 2.5 0 0 0 17.5 3H14v18a3 3 0 0 1 3-3h.5a2.5 2.5 0 0 1 2.5 2.5z"></path></svg></span><span>文献管理</span></a>
+            <a href="#settings-ai"><span class="settings-navigation-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m12 3 1.4 4.1a5.2 5.2 0 0 0 3.5 3.5L21 12l-4.1 1.4a5.2 5.2 0 0 0-3.5 3.5L12 21l-1.4-4.1a5.2 5.2 0 0 0-3.5-3.5L3 12l4.1-1.4a5.2 5.2 0 0 0 3.5-3.5z"></path></svg></span><span>AI 服务</span></a>
+            <a href="#settings-updates"><span class="settings-navigation-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"></circle><path d="M12 11v5M12 8h.01"></path></svg></span><span>关于与更新</span></a>
+          </nav>
+        </aside>
+        <form id="settings-form" class="settings-product-form">
+          <header class="settings-page-heading"><div><div class="eyebrow">GUZI SCHOLAR</div><h1>设置</h1><p>按分类查看偏好；常规更改即时生效并自动保存。</p></div><span id="settings-save-status" class="settings-save-status" role="status" aria-live="polite" data-state="saved">已保存</span></header>
+          <section id="settings-reading" class="settings-section">
+            <div class="settings-section-heading"><div><h2>外观与阅读</h2><p>界面明暗模式跟随 macOS，字体和系统重点色可独立选择。</p></div><span class="settings-badge">跟随系统</span></div>
+            <div class="settings-control-grid">
+              <label class="settings-select-field" for="setting-app-font"><span><strong>页面字体</strong><small>用于文献库、设置、工具栏和阅读助手界面。</small></span><select id="setting-app-font"><option value="system">系统默认</option><option value="pingfang">苹方</option><option value="songti">宋体</option></select></label>
+              <label class="settings-select-field" for="setting-reader-font"><span><strong>阅读器字体</strong><small>用于论文正文、译文、笔记和 AI 回答内容。</small></span><select id="setting-reader-font"><option value="academic">学术衬线</option><option value="songti">宋体</option><option value="georgia">Georgia</option><option value="sans">无衬线</option></select></label>
+            </div>
+            <div class="settings-row settings-accent-row"><div><strong>系统重点色</strong><small>用于页面下划线、复选框、按钮、焦点和进度等系统交互；不会改变个人标注或 AI 分类色。</small></div><div class="settings-accent-options" role="radiogroup" aria-label="系统重点色"><label class="settings-accent-option" data-accent="amber"><input type="radio" name="setting-accent" value="amber" checked><span class="settings-accent-swatch" aria-hidden="true"></span><span>琥珀</span><span class="settings-accent-check" aria-hidden="true">✓</span></label><label class="settings-accent-option" data-accent="blue"><input type="radio" name="setting-accent" value="blue"><span class="settings-accent-swatch" aria-hidden="true"></span><span>蓝色</span><span class="settings-accent-check" aria-hidden="true">✓</span></label><label class="settings-accent-option" data-accent="emerald"><input type="radio" name="setting-accent" value="emerald"><span class="settings-accent-swatch" aria-hidden="true"></span><span>翠绿</span><span class="settings-accent-check" aria-hidden="true">✓</span></label><label class="settings-accent-option" data-accent="violet"><input type="radio" name="setting-accent" value="violet"><span class="settings-accent-swatch" aria-hidden="true"></span><span>紫色</span><span class="settings-accent-check" aria-hidden="true">✓</span></label><label class="settings-accent-option" data-accent="rose"><input type="radio" name="setting-accent" value="rose"><span class="settings-accent-swatch" aria-hidden="true"></span><span>玫红</span><span class="settings-accent-check" aria-hidden="true">✓</span></label><label class="settings-accent-option" data-accent="graphite"><input type="radio" name="setting-accent" value="graphite"><span class="settings-accent-swatch" aria-hidden="true"></span><span>石墨</span><span class="settings-accent-check" aria-hidden="true">✓</span></label></div></div>
+            <div id="settings-appearance-preview" class="settings-appearance-preview" aria-label="外观设置预览">
+              <div class="appearance-preview-chrome"><span class="appearance-preview-mark" aria-hidden="true">✦</span><strong>页面字体预览</strong><span class="appearance-preview-tab">当前页面</span></div>
+              <div class="appearance-preview-content"><div class="appearance-preview-controls"><span class="appearance-preview-line"></span><span class="appearance-preview-line short"></span><label><input type="checkbox" checked disabled> 系统重点色</label><button type="button" tabindex="-1">重点按钮</button></div><article class="appearance-preview-paper"><strong>阅读器字体预览</strong><p>清晰的正文排版，让论文阅读更专注。</p><p lang="en">A focused reading surface for scholarly work.</p></article></div>
+            </div>
+            <div class="settings-row"><div><strong>本地阅读数据</strong><small>原文、译文、笔记与标注按文献目录保存在当前 Mac。</small></div><span class="settings-value">仅本机</span></div>
+            <div id="onboarding-settings-row" class="settings-row" hidden><div><strong>新手引导</strong><small>重新了解文献库、阅读工具、关系图谱与 AI 配置。</small></div><button id="replay-onboarding" class="secondary-button" type="button">重新查看</button></div>
+          </section>
+          <section id="settings-shortcuts" class="settings-section"><div class="settings-section-heading"><div><h2>快捷键</h2><p>点击字段后按下组合键；为避免误触，快捷键需要包含 Command 或 Control。</p></div></div><div class="shortcut-grid"><label>打开文献库<input id="shortcut-library" type="text" value="Cmd+1" inputmode="none" autocomplete="off" spellcheck="false" aria-describedby="shortcut-status"></label><label>打开设置<input id="shortcut-settings" type="text" value="Cmd+," inputmode="none" autocomplete="off" spellcheck="false" aria-describedby="shortcut-status"></label><label>快速高亮<input id="shortcut-highlight" type="text" value="Cmd+Shift+H" inputmode="none" autocomplete="off" spellcheck="false" aria-describedby="shortcut-status"></label><label>快速划线<input id="shortcut-underline" type="text" value="Cmd+Shift+U" inputmode="none" autocomplete="off" spellcheck="false" aria-describedby="shortcut-status"></label><label>快速高亮笔记<input id="shortcut-highlight-note" type="text" value="Cmd+Shift+J" inputmode="none" autocomplete="off" spellcheck="false" aria-describedby="shortcut-status"></label><label>快速划线随笔<input id="shortcut-underline-note" type="text" value="Cmd+Shift+K" inputmode="none" autocomplete="off" spellcheck="false" aria-describedby="shortcut-status"></label></div><small id="shortcut-status" class="shortcut-status" role="status" aria-live="polite">点击字段后按下新的组合键。</small></section>
+          <section id="settings-metadata" class="settings-section" hidden>
+            <div class="settings-section-heading"><div><h2>文献管理</h2><p>选择文献库位置，并控制导入后的书目识别与在线匹配。</p></div></div>
+            <div class="settings-library-location">
+              <div class="settings-library-location-copy">
+                <strong>文献库存放位置</strong>
+                <small>更换后会先复制并校验已有文献，确认完整后再切换；旧位置作为原始备份保留，再次更换时仍需选择空文件夹。</small>
+                <code id="library-location-path" title="当前文献库存放位置">正在读取当前位置…</code>
+              </div>
+              <div class="settings-library-location-actions">
+                <button id="choose-library-location" class="secondary-button" type="button">选择文件夹</button>
+                <small id="library-location-status" role="status" aria-live="polite"></small>
+              </div>
+            </div>
+            <label class="settings-toggle"><span><strong>自动检索元数据</strong><small>导入后自动读取标题、作者、期刊和 DOI。</small></span><input id="setting-metadata-auto" type="checkbox" checked></label>
+            <label class="settings-toggle"><span><strong>允许在线匹配</strong><small>使用 DOI、arXiv、PubMed 和 Crossref 公共服务。</small></span><input id="setting-metadata-online" type="checkbox" checked></label>
+            <label class="settings-field">Crossref 联系邮箱（可选）<input id="setting-metadata-email" type="email" placeholder="用于礼貌请求与限流识别"></label>
+          </section>
+          <section id="settings-ai" class="settings-section" hidden>
+            <div class="settings-section-heading"><div><h2>AI 服务</h2><p>填写你自己的 OpenAI-compatible 服务地址、密钥和模型；配置只保存在当前设备。</p></div><span class="settings-badge">本机配置</span></div>
+            <div class="ai-credentials-grid">
+              <article class="ai-credential-card" data-ai-config="translation">
+                <div class="ai-credential-heading"><span class="ai-service-icon" aria-hidden="true">译</span><div><h3>翻译服务</h3><p>选区、段落与全文翻译</p></div></div>
+                <label class="settings-field">Base URL<input id="setting-translation-base-url" type="url" inputmode="url" autocomplete="url" placeholder="例如：https://api.example.com/v1"></label>
+                <label class="settings-field">API Key<input id="setting-translation-api-key" type="password" autocomplete="off" placeholder="留空保持已保存的密钥"></label>
+                <label class="settings-field">模型<input id="setting-translation-model" type="text" autocomplete="off" placeholder="例如：qwen-mt-plus"></label>
+                <div class="ai-credential-actions"><button class="secondary-button compact-button" data-ai-models="translation" type="button">查询模型</button><button class="secondary-button compact-button" data-ai-reuse-source="translation" data-ai-reuse-target="chat" type="button">复用到文章助手</button></div>
+                <div class="ai-model-picker" id="setting-translation-model-picker" hidden><label class="settings-field">筛选模型<input id="setting-translation-model-filter" type="search" autocomplete="off" placeholder="输入关键词筛选"></label><select id="setting-translation-model-list" size="5" aria-label="翻译服务模型列表"></select><small id="setting-translation-model-status" role="status"></small></div>
+                <label class="settings-checkbox"><input id="setting-translation-clear-key" type="checkbox"><span>清除已保存的 API Key</span></label>
+              </article>
+              <article class="ai-credential-card" data-ai-config="chat">
+                <div class="ai-credential-heading"><span class="ai-service-icon" aria-hidden="true">AI</span><div><h3>文章助手</h3><p>Chat、阅读重点与内容分析</p></div></div>
+                <label class="settings-field">Base URL<input id="setting-chat-base-url" type="url" inputmode="url" autocomplete="url" placeholder="例如：https://api.example.com/v1"></label>
+                <label class="settings-field">API Key<input id="setting-chat-api-key" type="password" autocomplete="off" placeholder="留空保持已保存的密钥"></label>
+                <label class="settings-field">模型<input id="setting-chat-model" type="text" autocomplete="off" placeholder="例如：gpt-4o-mini"></label>
+                <div class="ai-credential-actions"><button class="secondary-button compact-button" data-ai-models="chat" type="button">查询模型</button><button class="secondary-button compact-button" data-ai-reuse-source="chat" data-ai-reuse-target="translation" type="button">复用到翻译服务</button></div>
+                <div class="ai-model-picker" id="setting-chat-model-picker" hidden><label class="settings-field">筛选模型<input id="setting-chat-model-filter" type="search" autocomplete="off" placeholder="输入关键词筛选"></label><select id="setting-chat-model-list" size="5" aria-label="文章助手模型列表"></select><small id="setting-chat-model-status" role="status"></small></div>
+                <label class="settings-checkbox"><input id="setting-chat-clear-key" type="checkbox"><span>清除已保存的 API Key</span></label>
+              </article>
+            </div>
+            <div id="ai-status-overview" class="ai-status-overview is-unknown" role="status" aria-live="polite">
+              <span class="ai-status-overview-dot" aria-hidden="true"></span>
+              <div><h3 id="ai-status-overview-title">尚未检测</h3><p id="ai-status-overview-detail">点击“立即检测”，确认本机到两项 AI 服务的实际连接状态。</p></div>
+              <time id="ai-status-overview-time">暂无检测记录</time>
+            </div>
+            <div class="ai-service-grid">
+              <article class="ai-service-card" data-ai-service="translation">
+                <div class="ai-service-card-heading"><span class="ai-service-icon" aria-hidden="true">译</span><div><h3>翻译服务</h3><p>选区、段落与全文翻译</p></div><span id="setting-translation-status" class="ai-service-status is-unknown">尚未检测</span></div>
+                <dl><div><dt>服务配置</dt><dd id="setting-translation-configuration">读取中</dd></div><div><dt>最近响应</dt><dd id="setting-translation-latency">—</dd></div></dl>
+                <p id="setting-translation-result" class="ai-service-result" role="status" aria-live="polite" hidden></p>
+              </article>
+              <article class="ai-service-card" data-ai-service="chat">
+                <div class="ai-service-card-heading"><span class="ai-service-icon" aria-hidden="true">AI</span><div><h3>文章助手</h3><p>Chat、阅读重点与内容分析</p></div><span id="setting-chat-status" class="ai-service-status is-unknown">尚未检测</span></div>
+                <dl><div><dt>服务配置</dt><dd id="setting-chat-configuration">读取中</dd></div><div><dt>最近响应</dt><dd id="setting-chat-latency">—</dd></div></dl>
+                <p id="setting-chat-result" class="ai-service-result" role="status" aria-live="polite" hidden></p>
+              </article>
+            </div>
+            <div class="settings-inline-actions"><button id="test-ai-button" class="secondary-button settings-test-button" type="button">立即检测</button><small class="settings-gateway-hint">仅在点击时发起真实请求，不会在后台持续调用。请求会直接发送到你填写的服务地址。</small></div>
+            <div class="ai-status-history"><div class="ai-status-history-heading"><strong>检测历史</strong><small id="ai-status-history-count">仅保存在当前设备</small></div><ol id="ai-status-history-list"><li class="ai-status-history-empty">还没有检测记录。</li></ol><nav id="ai-status-history-pagination" class="ai-status-history-pagination" aria-label="检测历史翻页" hidden><button id="ai-status-history-prev" class="secondary-button compact-button" type="button">上一页</button><span id="ai-status-history-page" aria-live="polite"></span><button id="ai-status-history-next" class="secondary-button compact-button" type="button">下一页</button></nav></div>
+          </section>
+          <section id="settings-updates" class="settings-section" hidden>
+            <div class="settings-section-heading"><div><h2>关于与更新</h2><p>查看当前版本、开源来源，并在需要时主动检查新版本。</p></div><span class="settings-badge">开源版本</span></div>
+            <div class="update-summary-grid" aria-label="应用版本信息">
+              <div><span>当前版本</span><strong id="app-current-version">读取中</strong></div>
+              <div><span>系统架构</span><strong id="app-platform-arch">macOS</strong></div>
+              <div><span>更新通道</span><strong id="app-update-channel">开源版本</strong></div>
+            </div>
+            <div class="settings-row source-attribution-row">
+              <div><strong>开源来源</strong><small>本软件基于谷子学术（Guzi Scholar）开源项目。二次开发与再发布请保留项目名称、来源说明和本页面的署名信息。</small></div>
+              <a class="secondary-button compact-button" href="https://github.com/ShiLong-CN/guzi-scholar" target="_blank" rel="noreferrer">查看源代码</a>
+            </div>
+            <div id="update-status-card" class="update-status-card is-idle" role="status" aria-live="polite">
+              <span class="update-status-dot" aria-hidden="true"></span>
+              <div class="update-status-copy"><strong id="update-status-title">尚未检查更新</strong><small id="update-status-detail">仅在你点击时连接谷子学术更新服务，不会在后台自动下载。</small><time id="update-checked-time"></time></div>
+              <div class="update-status-actions"><button id="check-updates" class="secondary-button" type="button">检查更新</button><button id="download-update" class="primary-button compact-button" type="button" hidden>下载新版本</button></div>
+            </div>
+            <div id="update-release-details" class="update-release-details" hidden>
+              <div><strong id="update-release-version">新版本</strong><small id="update-release-date"></small></div>
+              <p id="update-release-notes"></p>
+              <code id="update-release-sha" title="安装包 SHA-256"></code>
+            </div>
+            <small class="settings-gateway-hint">当前未签名测试包只检查并提示下载；取得 Apple Developer ID 并完成公证后，再启用应用内自动安装。</small>
+          </section>
+        </form>
+      </div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+  <dialog id="onboarding-dialog" class="onboarding-dialog" aria-labelledby="onboarding-title-1" aria-describedby="onboarding-description-1">
+    <div class="onboarding-surface">
+      <header class="onboarding-header">
+        <div class="onboarding-brand"><picture><source media="(prefers-color-scheme: dark)" srcset="/web/assets/brand-glyph-dark-96.png"><img src="/web/assets/brand-glyph-96.png" alt=""></picture><span><strong>谷子学术</strong><small>首次使用引导</small></span></div>
+        <button id="onboarding-skip" class="onboarding-skip" type="button">暂时跳过</button>
+      </header>
+      <div class="onboarding-progress-row">
+        <span id="onboarding-step-label">第 1 步，共 4 步</span>
+        <div id="onboarding-progress" class="onboarding-progress" role="progressbar" aria-label="新手引导进度" aria-valuemin="1" aria-valuemax="4" aria-valuenow="1"><span></span></div>
+      </div>
+      <div class="onboarding-stage" aria-live="polite">
+        <article class="onboarding-slide is-active" data-onboarding-step="0" aria-hidden="false">
+          <div class="onboarding-visual onboarding-welcome-visual" aria-hidden="true">
+            <span class="onboarding-orbit orbit-one"></span><span class="onboarding-orbit orbit-two"></span>
+            <picture class="onboarding-hero-logo"><source media="(prefers-color-scheme: dark)" srcset="/web/assets/brand-glyph-dark-96.png"><img src="/web/assets/brand-glyph-96.png" alt=""></picture>
+            <span class="onboarding-floating-chip chip-library">本地文献库</span><span class="onboarding-floating-chip chip-reading">专注阅读</span><span class="onboarding-floating-chip chip-graph">关系图谱</span>
+          </div>
+          <div class="onboarding-copy">
+            <span class="onboarding-kicker">WELCOME TO GUZI SCHOLAR</span>
+            <h1 id="onboarding-title-1" tabindex="-1">欢迎来到谷子学术</h1>
+            <p id="onboarding-description-1">把文献、阅读记录和研究线索留在同一个清晰的工作空间里。</p>
+            <ul class="onboarding-points"><li><span>01</span>围绕论文组织，而不是围绕文件窗口组织</li><li><span>02</span>本地阅读数据保存在当前 Mac</li><li><span>03</span>开源代码支持自由二次开发</li></ul>
+          </div>
+        </article>
+        <article class="onboarding-slide is-after" data-onboarding-step="1" aria-hidden="true">
+          <div class="onboarding-visual" aria-hidden="true">
+            <svg class="onboarding-illustration" viewBox="0 0 360 280" fill="none">
+              <path class="onboarding-svg-soft" d="M69 74h83l17 22h122v128a22 22 0 0 1-22 22H69a22 22 0 0 1-22-22V96a22 22 0 0 1 22-22Z"></path>
+              <path class="onboarding-svg-line" d="M48 113h264M91 144h178M91 177h139M91 210h161"></path>
+              <rect class="onboarding-svg-card" x="239" y="38" width="74" height="94" rx="13"></rect>
+              <path class="onboarding-svg-accent" d="M258 59h36M258 75h36M258 91h25"></path>
+              <path class="onboarding-svg-accent" d="m277 113 8 8 18-20"></path>
+            </svg>
+          </div>
+          <div class="onboarding-copy">
+            <span class="onboarding-kicker">YOUR LOCAL LIBRARY</span>
+            <h1 id="onboarding-title-2" tabindex="-1">继续使用你的本地文献库</h1>
+            <p id="onboarding-description-2">谷子学术会先检查旧版默认目录，避免重复安装后看不到原来的文章。</p>
+            <div id="onboarding-library-recovery" class="onboarding-library-recovery" hidden><div><strong id="onboarding-library-recovery-title"></strong><small id="onboarding-library-recovery-detail"></small></div><div id="onboarding-library-conflict-actions" class="onboarding-library-conflict-actions" hidden><button id="onboarding-keep-current-library" class="secondary-button" type="button">继续使用当前库</button><button id="onboarding-use-legacy-library" class="primary-button compact-button" type="button">使用旧版文献库</button></div></div>
+            <ul class="onboarding-points"><li><span>01</span>直接导入 PDF，随时调整存放位置</li><li><span>02</span>按文件夹、主题与自定义属性整理</li><li><span>03</span>原文、笔记和标注默认留在本机</li></ul>
+          </div>
+        </article>
+        <article class="onboarding-slide is-after" data-onboarding-step="2" aria-hidden="true">
+          <div class="onboarding-visual" aria-hidden="true">
+            <svg class="onboarding-illustration onboarding-graph-illustration" viewBox="0 0 360 280" fill="none">
+              <path class="onboarding-svg-line" d="M91 76 181 137M181 137l91-61M181 137l-82 76M181 137l91 76M91 76l8 137M272 76v137"></path>
+              <path class="onboarding-svg-dashed" d="M91 76h181M99 213h173"></path>
+              <circle class="onboarding-svg-node" cx="91" cy="76" r="25"></circle><circle class="onboarding-svg-node" cx="181" cy="137" r="32"></circle><circle class="onboarding-svg-node" cx="99" cy="213" r="23"></circle><circle class="onboarding-svg-node" cx="272" cy="76" r="23"></circle><circle class="onboarding-svg-node" cx="272" cy="213" r="27"></circle>
+              <rect class="onboarding-svg-card" x="147" y="116" width="68" height="42" rx="12"></rect><path class="onboarding-svg-accent" d="M163 130h36M163 143h27"></path>
+            </svg>
+          </div>
+          <div class="onboarding-copy">
+            <span class="onboarding-kicker">READ · CONNECT · DISCOVER</span>
+            <h1 id="onboarding-title-3" tabindex="-1">从阅读走向关联</h1>
+            <p id="onboarding-description-3">边读边记录，再通过关系图谱观察主题、属性和文献之间的联系。</p>
+            <ul class="onboarding-points"><li><span>01</span>高亮、划线、随笔与文章笔记</li><li><span>02</span>按主题和属性探索文献关系</li><li><span>03</span>仅在你主动使用时提交 AI 请求</li></ul>
+          </div>
+        </article>
+        <article class="onboarding-slide is-after" data-onboarding-step="3" aria-hidden="true">
+          <div class="onboarding-visual onboarding-ready-visual" aria-hidden="true">
+            <div class="onboarding-ready-card"><span class="onboarding-ready-check">✓</span><picture><source media="(prefers-color-scheme: dark)" srcset="/web/assets/brand-glyph-dark-96.png"><img src="/web/assets/brand-glyph-96.png" alt=""></picture><strong>研究空间已准备好</strong><small>从导入第一篇文献开始</small></div>
+          </div>
+          <div class="onboarding-copy">
+            <span class="onboarding-kicker">READY WHEN YOU ARE</span>
+            <h1 id="onboarding-title-4" tabindex="-1">现在，开始你的研究</h1>
+            <p id="onboarding-description-4">你的本地研究空间已经准备好，AI 配置与文献库状态也可以随时在设置中查看。</p>
+            <ul class="onboarding-points"><li><span>01</span>从“导入 PDF”建立第一条研究线索</li><li><span>02</span>使用你自己的 AI 服务配置</li><li><span>03</span>新手引导可以随时在设置中重看</li></ul>
+          </div>
+        </article>
+      </div>
+      <footer class="onboarding-footer">
+        <button id="onboarding-back" class="secondary-button onboarding-back" type="button" disabled>上一步</button>
+        <div id="onboarding-dots" class="onboarding-dots" aria-hidden="true"><span class="is-active"></span><span></span><span></span><span></span></div>
+        <button id="onboarding-next" class="primary-button onboarding-next" type="button">下一步</button>
+      </footer>
+      <p id="onboarding-status" class="onboarding-status" role="alert" hidden></p>
+    </div>
+  </dialog>
+
+  <div id="image-lightbox" class="image-lightbox" role="dialog" aria-modal="true" aria-label="图片放大查看" aria-hidden="true" data-image-lightbox-backdrop hidden>
+    <button id="image-lightbox-close" class="image-lightbox-close" type="button" aria-label="关闭图片查看器">×</button>
+    <figure class="image-lightbox-content">
+      <img id="image-lightbox-image" class="image-lightbox-image" alt="">
+      <figcaption id="image-lightbox-caption" class="image-lightbox-caption" hidden></figcaption>
+    </figure>
+  </div>
+  <div id="image-context-menu" class="image-context-menu" role="menu" aria-label="图片操作" hidden>
+    <button type="button" role="menuitem" data-image-action="copy"><span>复制图片</span></button>
+    <button type="button" role="menuitem" data-image-action="add-chat"><span>添加到 Chat</span></button>
+  </div>
+  <div id="global-menu-layer" class="global-menu-layer">
+    <div id="grouping-field-menu" class="grouping-field-menu" role="listbox" aria-labelledby="grouping-button" hidden></div>
+    <div id="chat-session-menu" class="chat-session-menu" role="menu" aria-label="会话操作" hidden>
+      <button type="button" role="menuitem" data-chat-session-action="pin">置顶</button>
+      <button type="button" role="menuitem" data-chat-session-action="rename">重命名</button>
+      <button class="is-danger" type="button" role="menuitem" data-chat-session-action="delete">删除</button>
+    </div>
+  </div>
+
+  <dialog id="library-editor-dialog" class="library-dialog" aria-labelledby="library-editor-title">
+    <form id="library-editor-form" method="dialog">
+      <div class="dialog-heading"><div><div class="eyebrow">LIBRARY EDITOR</div><h2 id="library-editor-title">编辑属性</h2></div><button id="library-editor-close" class="dialog-close" value="cancel" type="submit" aria-label="关闭">×</button></div>
+      <div id="library-editor-content" class="dialog-content"></div>
+      <div class="dialog-actions"><button id="library-editor-cancel" class="secondary-button" value="cancel" type="submit">取消</button><button id="library-editor-save" class="primary-button compact-button" value="default" type="submit">保存</button></div>
+    </form>
+  </dialog>
+  <dialog id="metadata-dialog" class="metadata-dialog">
+    <form id="metadata-form" method="dialog">
+      <div class="dialog-heading"><div><div class="eyebrow">BIBLIOGRAPHIC RECORD</div><h2>文献元数据</h2></div><button class="dialog-close" value="cancel" type="submit" aria-label="关闭">×</button></div>
+      <div id="metadata-content" class="metadata-content"></div>
+      <div class="dialog-actions"><span id="metadata-status" class="panel-status"></span><button id="metadata-retrieve-button" class="secondary-button" value="retrieve" type="button">重新检索</button><button id="metadata-save-button" class="primary-button compact-button" value="default" type="submit">保存</button></div>
+    </form>
+  </dialog>
+  <dialog id="confirm-dialog" class="library-dialog confirm-dialog">
+    <form id="confirm-form" method="dialog">
+      <div class="dialog-heading"><div><div class="eyebrow">CONFIRM ACTION</div><h2 id="confirm-title">请确认</h2></div><button class="dialog-close" value="cancel" type="submit" aria-label="关闭">×</button></div>
+      <p id="confirm-message" class="confirm-message"></p>
+      <div class="dialog-actions"><button id="confirm-cancel" class="secondary-button" value="cancel" type="submit">取消</button><button id="confirm-accept" class="primary-button compact-button" value="default" type="submit">确定</button></div>
+    </form>
+  </dialog>
+
+  <script src="/web/vendor/cytoscape.min.js"></script>
+  <script src="/web/graph-model.js"></script>
+  <script src="/web/graph-view.js"></script>
+  <script src="/web/app.js"></script>
+</body>
+</html>

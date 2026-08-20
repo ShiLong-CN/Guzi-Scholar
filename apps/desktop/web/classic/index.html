@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>谷子学术 · 本地论文阅读器</title>
+  <link rel="icon" type="image/png" href="/web/assets/app-icon.png">
+  <link rel="stylesheet" href="/web/classic/styles.css">
+</head>
+<body>
+  <header class="app-header">
+    <div class="brand-mark" aria-label="谷子学术"><img class="brand-glyph" src="/web/assets/brand-glyph-96.png" alt=""><span>谷子学术</span></div>
+    <nav class="top-nav" aria-label="主导航">
+      <button class="nav-button active" data-view="library-view">文献库 <span id="library-count" class="nav-count">0</span></button>
+      <button class="nav-button" data-view="settings-view">设置</button>
+    </nav>
+    <div class="header-spacer"></div>
+  </header>
+
+  <main class="app-shell">
+    <section id="library-view" class="view active-view">
+      <div class="library-hero">
+        <div>
+          <div class="eyebrow">LOCAL RESEARCH READER · 0.2</div>
+          <h1>把论文还原成<br><em>可阅读、可复用的结构。</em></h1>
+          <p class="hero-copy">版面优先解析图、表、公式与引用；正文按连续阅读方式呈现。无需账户，数据只在当前机器。</p>
+        </div>
+        <div class="hero-principles"><span>布局 JSON</span><span>MathML / LaTeX</span><span>可审计 AI</span></div>
+      </div>
+
+      <section class="upload-card" id="drop-zone">
+        <input id="file-input" type="file" accept="application/pdf,.pdf" hidden>
+        <div class="upload-icon" aria-hidden="true">＋</div>
+        <div class="upload-title">拖入 PDF，或 <button id="choose-button" class="link-button" type="button">选择文件</button></div>
+        <div class="upload-hint">初版上限 100 MB · 解析在本机进行 · 无需登录</div>
+        <div id="selected-file" class="selected-file" hidden></div>
+        <button id="upload-button" class="primary-button" type="button" disabled>加入文献库</button>
+        <div id="upload-error" class="inline-error" role="alert" hidden></div>
+      </section>
+
+      <section id="progress-card" class="progress-card" hidden>
+        <div class="progress-head"><span id="progress-stage">等待开始</span><span id="progress-value">0%</span></div>
+        <div class="progress-track"><div id="progress-bar" class="progress-bar"></div></div>
+        <div id="progress-detail" class="progress-detail">正在准备本地转换器…</div>
+      </section>
+
+      <section class="library-section">
+        <div class="section-heading"><div><div class="section-kicker">YOUR LIBRARY</div><h2>最近阅读</h2></div><label class="search-box"><span>⌕</span><input id="library-search" type="search" placeholder="搜索文件名"></label></div>
+        <div id="recent-list" class="library-grid"><div class="empty-state">还没有转换任务。拖入一份 PDF 开始。</div></div>
+      </section>
+    </section>
+
+    <section id="reader-view" class="view" hidden>
+      <div class="reader-toolbar">
+        <button id="back-library" class="icon-button" type="button" title="返回文献库">←</button>
+        <div class="reader-heading"><div id="reader-title" class="reader-title">未选择文章</div><div id="reader-meta" class="reader-meta"></div></div>
+        <div class="reader-actions">
+          <button id="auto-highlight-button" class="secondary-button" type="button">✦ 自动重点</button>
+        </div>
+      </div>
+      <div class="reader-grid">
+        <div class="reader-frame-wrap"><iframe id="html-preview" title="论文阅读器" loading="eager"></iframe><div id="selection-popover" class="selection-popover" hidden><span id="selection-preview"></span><button id="selection-highlight" type="button">高亮</button><button id="selection-underline" type="button">划线</button><button id="selection-translate" type="button">翻译</button><button id="selection-add-chat" type="button">加入 Chat</button></div></div>
+        <aside class="reader-sidebar">
+          <div class="sidebar-tabs"><button class="sidebar-tab active" data-panel="chat-panel">AI 对话</button><button class="sidebar-tab" data-panel="notes-panel">笔记</button><button class="sidebar-tab" data-panel="annotations-panel">划线</button></div>
+          <section id="chat-panel" class="sidebar-panel active-panel">
+            <div class="panel-intro"><strong>文章助手</strong><span>选中文本后可加入 Chat，再编辑或发送</span></div>
+            <div id="selected-context" class="selected-context" hidden></div>
+            <div id="chat-messages" class="chat-messages"><div class="chat-empty">可以问我：这篇文章的贡献是什么？表格中的指标如何比较？</div></div>
+            <form id="chat-form" class="chat-form"><textarea id="chat-input" rows="3" placeholder="针对当前文章提问…（Enter 发送，⌘ Enter 换行）"></textarea><button class="primary-button" type="submit">发送 <span>Enter</span></button></form>
+            <div id="chat-status" class="panel-status" hidden></div>
+          </section>
+          <section id="notes-panel" class="sidebar-panel" hidden>
+            <div class="panel-intro"><strong>文章笔记</strong><span>Markdown · 自动保存到本机</span></div>
+            <div class="notes-tools"><button id="insert-image-button" class="tiny-button" type="button">插入图片</button><input id="note-image-input" type="file" accept="image/*" hidden><button id="save-notes-button" class="tiny-button" type="button">保存</button><span id="notes-saved" class="saved-state"></span></div>
+            <textarea id="notes-editor" class="notes-editor" placeholder="# 我的阅读笔记
+
+记录想法、引用和后续实验…"></textarea>
+            <div class="notes-preview-label">预览</div><div id="notes-preview" class="notes-preview"></div>
+          </section>
+          <section id="annotations-panel" class="sidebar-panel" hidden>
+            <div class="panel-intro"><strong>划线与重点</strong><span id="annotation-count">0 条</span></div>
+            <div id="annotations-list" class="annotations-list"><div class="chat-empty">还没有划线。</div></div>
+          </section>
+        </aside>
+      </div>
+    </section>
+
+    <section id="settings-view" class="view" hidden>
+      <div class="settings-heading"><div class="eyebrow">LOCAL CONFIGURATION</div><h1>设置</h1><p>阅读偏好可以在这里调整；AI 服务由项目开发配置提供，此页面不会显示或修改连接信息。</p></div>
+      <form id="settings-form" class="settings-card">
+        <div class="settings-group"><h2>AI 服务</h2><p class="settings-help">翻译与文章助手使用独立的固定配置；这里只展示安全的运行状态。</p><div class="classic-ai-services"><div class="classic-ai-service"><strong>翻译服务</strong><span id="setting-translation-status">读取中</span><small id="setting-translation-model">正在读取…</small></div><div class="classic-ai-service"><strong>文章助手</strong><span id="setting-chat-status">读取中</span><small id="setting-chat-model">正在读取…</small></div></div><button id="test-ai-button" class="secondary-button settings-test-button" type="button">测试两项服务</button><small id="setting-ai-results" class="settings-gateway-hint" role="status" aria-live="polite"></small></div>
+        <div class="settings-group"><h2>快捷键</h2><label>打开文献库<input id="shortcut-library" type="text" value="Cmd+1"></label><label>打开设置<input id="shortcut-settings" type="text" value="Cmd+,"></label></div>
+        <div class="settings-actions"><button class="primary-button" type="submit">保存设置</button><span id="settings-status" class="panel-status" hidden></span></div>
+      </form>
+    </section>
+  </main>
+
+  <footer class="site-footer">谷子学术 · 本地优先的学术阅读器</footer>
+  <script src="/web/classic/app.js"></script>
+</body>
+</html>

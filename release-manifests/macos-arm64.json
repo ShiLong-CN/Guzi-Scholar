@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "platform": "darwin",
+  "arch": "arm64",
+  "channel": "stable",
+  "version": "0.1.0",
+  "download_url": "https://github.com/ShiLong-CN/guzi-scholar/releases/download/v0.1.0/Guzi-Scholar-0.1.0-arm64-internal.dmg",
+  "sha256": "8ee9d61c22de5250668669955a6d9404db2e663b2a746b681e067dd3756bb898",
+  "notes": "Guzi Scholar 0.1.0 open-source preview",
+  "published_at": "2026-08-20T03:08:37Z",
+  "minimum_system_version": "12.0"
+}

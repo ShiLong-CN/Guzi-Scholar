@@ -1,0 +1,52 @@
+name: Checks
+
+on:
+  pull_request:
+  push:
+    branches: [main, redesign-v2]
+
+permissions:
+  contents: read
+
+jobs:
+  secrets:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Scan commits and working tree
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+  desktop:
+    name: Desktop checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install desktop dependencies
+        run: npm ci --prefix apps/desktop
+      - name: Install shell syntax checker
+        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y zsh
+      - name: Check JavaScript and shell syntax
+        run: npm run desktop:check:syntax
+      - name: Run Python unit tests
+        run: npm --prefix apps/desktop run test:unit
+      - name: Run graph and storage checks
+        run: |
+          npm --prefix apps/desktop run test:graph
+          npm --prefix apps/desktop run test:storage

@@ -1,0 +1,2175 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="用 Attention Is All You Need 真实前五页，对比 Zotero PDF 阅读工作流与谷子学术连续阅读、线索关联体验。">
+  <meta name="color-scheme" content="light">
+  <title>真实论文阅读对比 · 谷子学术 Demo</title>
+  <link rel="icon" href="assets/app-icon.png">
+  <style>
+    :root {
+      --canvas: #f3f0e8;
+      --paper: #fffef9;
+      --paper-pure: #fff;
+      --ink: #22251f;
+      --muted: #6f746b;
+      --line: rgba(39, 43, 36, .14);
+      --line-strong: rgba(39, 43, 36, .24);
+      --green: #49634f;
+      --green-deep: #304839;
+      --green-soft: #e5ece3;
+      --moss: #859477;
+      --amber: #cf8b31;
+      --amber-soft: #f8ead4;
+      --red: #b74a47;
+      --zotero-red: #9e2f2f;
+      --zotero-soft: #f6eeee;
+      --shadow: 0 24px 70px rgba(40, 43, 35, .13);
+      --shadow-soft: 0 12px 34px rgba(40, 43, 35, .09);
+      --radius: 22px;
+      --ui: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Helvetica Neue", sans-serif;
+      --serif: "Iowan Old Style", "Palatino Linotype", "Songti SC", "Times New Roman", serif;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background:
+        radial-gradient(circle at 8% 5%, rgba(73, 99, 79, .09), transparent 28rem),
+        linear-gradient(180deg, #f7f4ec 0, var(--canvas) 42rem, #eeece4 100%);
+      color: var(--ink);
+      font-family: var(--ui);
+      -webkit-font-smoothing: antialiased;
+    }
+    body.is-modal-open { overflow: hidden; }
+    button, a { font: inherit; }
+    button { color: inherit; }
+    a { color: inherit; }
+    img { display: block; max-width: 100%; }
+    [hidden] { display: none !important; }
+
+    .skip-link {
+      position: fixed;
+      z-index: 500;
+      top: 12px;
+      left: 12px;
+      padding: 10px 14px;
+      border-radius: 9px;
+      background: var(--ink);
+      color: #fff;
+      transform: translateY(-150%);
+    }
+    .skip-link:focus { transform: translateY(0); }
+
+    .topbar {
+      position: sticky;
+      z-index: 120;
+      top: 0;
+      display: grid;
+      min-height: 66px;
+      grid-template-columns: 1fr auto 1fr;
+      align-items: center;
+      gap: 20px;
+      padding: 0 28px;
+      border-bottom: 1px solid rgba(39, 43, 36, .1);
+      background: rgba(247, 244, 236, .9);
+      backdrop-filter: blur(20px);
+    }
+    .brand {
+      display: inline-flex;
+      width: fit-content;
+      align-items: center;
+      gap: 10px;
+      text-decoration: none;
+    }
+    .brand img {
+      width: 34px;
+      height: 34px;
+      border-radius: 9px;
+      box-shadow: 0 4px 12px rgba(40, 43, 35, .12);
+    }
+    .brand-copy { display: grid; gap: 1px; }
+    .brand-copy strong { font-size: 14px; letter-spacing: .02em; }
+    .brand-copy small { color: var(--muted); font-size: 9px; letter-spacing: .18em; }
+    .topnav {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: rgba(255,255,255,.58);
+    }
+    .topnav a {
+      padding: 7px 13px;
+      border-radius: 999px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 650;
+      text-decoration: none;
+    }
+    .topnav a:hover, .topnav a:focus-visible { background: #fff; color: var(--ink); }
+    .top-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+    }
+    .top-link {
+      display: inline-flex;
+      min-height: 34px;
+      align-items: center;
+      justify-content: center;
+      padding: 0 13px;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      background: rgba(255,255,255,.64);
+      font-size: 11px;
+      font-weight: 680;
+      text-decoration: none;
+    }
+    .top-link:hover { border-color: var(--line-strong); background: #fff; }
+
+    .page-shell {
+      width: min(1540px, calc(100% - 48px));
+      margin: 0 auto;
+    }
+    .hero {
+      display: grid;
+      min-height: 600px;
+      grid-template-columns: minmax(0, 1.05fr) minmax(400px, .95fr);
+      align-items: center;
+      gap: clamp(44px, 7vw, 108px);
+      padding: 88px 0 72px;
+    }
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      color: var(--green);
+      font-size: 11px;
+      font-weight: 760;
+      letter-spacing: .16em;
+      text-transform: uppercase;
+    }
+    .eyebrow::before {
+      width: 28px;
+      height: 1px;
+      background: currentColor;
+      content: "";
+    }
+    .hero h1 {
+      max-width: 850px;
+      margin: 24px 0 24px;
+      font-family: var(--serif);
+      font-size: clamp(48px, 6.3vw, 94px);
+      font-weight: 520;
+      letter-spacing: -.055em;
+      line-height: .98;
+    }
+    .hero h1 em { color: var(--green); font-style: normal; }
+    .hero-lede {
+      max-width: 650px;
+      margin: 0;
+      color: #555c53;
+      font-family: var(--serif);
+      font-size: clamp(18px, 1.7vw, 25px);
+      line-height: 1.62;
+    }
+    .hero-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 32px;
+    }
+    .primary-action, .secondary-action {
+      display: inline-flex;
+      min-height: 44px;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      padding: 0 17px;
+      border-radius: 10px;
+      font-size: 12px;
+      font-weight: 720;
+      text-decoration: none;
+    }
+    .primary-action { border: 1px solid var(--green-deep); background: var(--green-deep); color: #fff; }
+    .primary-action:hover { background: #253a2d; }
+    .secondary-action { border: 1px solid var(--line-strong); background: rgba(255,255,255,.62); }
+    .secondary-action:hover { background: #fff; }
+    .source-facts {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 20px;
+    }
+    .source-facts span {
+      padding: 6px 9px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      color: var(--muted);
+      background: rgba(255,255,255,.4);
+      font-size: 10px;
+    }
+
+    .hero-proof {
+      position: relative;
+      min-height: 520px;
+    }
+    .proof-paper {
+      position: absolute;
+      width: min(410px, 76%);
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: white;
+      box-shadow: var(--shadow);
+    }
+    .proof-paper img { width: 100%; }
+    .proof-paper:first-child { top: 0; left: 0; transform: rotate(-3.4deg); }
+    .proof-paper:nth-child(2) { right: 0; bottom: 4px; transform: rotate(3.8deg); }
+    .proof-seal {
+      position: absolute;
+      z-index: 4;
+      right: 13%;
+      top: 41%;
+      display: grid;
+      width: 128px;
+      height: 128px;
+      place-content: center;
+      border: 1px solid rgba(255,255,255,.45);
+      border-radius: 50%;
+      background: rgba(48, 72, 57, .94);
+      box-shadow: 0 18px 36px rgba(48,72,57,.25);
+      color: #fff;
+      text-align: center;
+      transform: rotate(-8deg);
+    }
+    .proof-seal strong { font-family: var(--serif); font-size: 21px; font-weight: 520; }
+    .proof-seal small { margin-top: 4px; font-size: 9px; letter-spacing: .14em; }
+
+    .truth-band {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      margin-bottom: 112px;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: rgba(255,255,255,.56);
+      box-shadow: var(--shadow-soft);
+    }
+    .truth-item { min-height: 116px; padding: 24px 28px; }
+    .truth-item + .truth-item { border-left: 1px solid var(--line); }
+    .truth-item small { color: var(--green); font-size: 9px; font-weight: 800; letter-spacing: .16em; }
+    .truth-item strong { display: block; margin-top: 9px; font-family: var(--serif); font-size: 22px; font-weight: 540; }
+    .truth-item p { margin: 6px 0 0; color: var(--muted); font-size: 12px; line-height: 1.55; }
+
+    .showcase-section { scroll-margin-top: 90px; padding: 0 0 128px; }
+    .section-heading {
+      display: grid;
+      grid-template-columns: 150px minmax(0, 760px) 1fr;
+      align-items: end;
+      gap: 28px;
+      margin-bottom: 34px;
+    }
+    .section-index {
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 740;
+      letter-spacing: .13em;
+    }
+    .section-heading h2 {
+      margin: 0;
+      font-family: var(--serif);
+      font-size: clamp(38px, 4.6vw, 66px);
+      font-weight: 520;
+      letter-spacing: -.035em;
+      line-height: 1.03;
+    }
+    .section-heading p {
+      max-width: 520px;
+      justify-self: end;
+      margin: 0;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.75;
+    }
+
+    .app-window {
+      overflow: hidden;
+      border: 1px solid rgba(39,43,36,.2);
+      border-radius: var(--radius);
+      background: #fff;
+      box-shadow: var(--shadow);
+    }
+    .window-titlebar {
+      display: grid;
+      min-height: 44px;
+      grid-template-columns: 1fr auto 1fr;
+      align-items: center;
+      padding: 0 15px;
+      border-bottom: 1px solid rgba(0,0,0,.1);
+      background: #f3f3f2;
+    }
+    .traffic-lights { display: flex; gap: 7px; }
+    .traffic-lights span { width: 11px; height: 11px; border-radius: 50%; background: #d5d5d2; }
+    .traffic-lights span:first-child { background: #ec6a5e; }
+    .traffic-lights span:nth-child(2) { background: #f4bd4f; }
+    .traffic-lights span:nth-child(3) { background: #61c454; }
+    .window-title { color: #555b55; font-size: 11px; font-weight: 650; }
+    .window-status { justify-self: end; color: #7b817a; font-size: 10px; }
+
+    .zotero-toolbar {
+      display: flex;
+      min-height: 45px;
+      align-items: center;
+      gap: 9px;
+      padding: 0 13px;
+      border-bottom: 1px solid #d9d9d7;
+      background: #fafafa;
+    }
+    .z-app-mark {
+      display: inline-grid;
+      width: 27px;
+      height: 27px;
+      place-items: center;
+      border-radius: 6px;
+      background: var(--zotero-red);
+      color: #fff;
+      font-family: Georgia, serif;
+      font-size: 16px;
+      font-weight: 700;
+    }
+    .z-tool {
+      min-height: 28px;
+      padding: 0 10px;
+      border: 1px solid #d2d2d0;
+      border-radius: 5px;
+      background: linear-gradient(#fff, #f4f4f3);
+      color: #4d504c;
+      font-size: 10px;
+    }
+    .z-search {
+      width: min(260px, 25vw);
+      height: 28px;
+      margin-left: auto;
+      padding: 0 10px;
+      border: 1px solid #d1d1cf;
+      border-radius: 6px;
+      background: #fff;
+      font: 10px var(--ui);
+    }
+    .zotero-grid {
+      display: grid;
+      height: min(820px, calc(100vh - 90px));
+      min-height: 650px;
+      grid-template-columns: 205px minmax(520px, 1fr) 285px;
+      background: #e9e9e7;
+    }
+    .z-library {
+      overflow: auto;
+      border-right: 1px solid #cdcdca;
+      background: #f4f4f2;
+    }
+    .z-library-head, .z-notes-head {
+      display: flex;
+      min-height: 37px;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 12px;
+      border-bottom: 1px solid #d6d6d3;
+      color: #5d625c;
+      font-size: 10px;
+      font-weight: 720;
+    }
+    .z-tree { padding: 8px; }
+    .z-tree-item {
+      display: flex;
+      min-height: 28px;
+      align-items: center;
+      gap: 7px;
+      padding: 0 8px;
+      border-radius: 5px;
+      color: #4a4d48;
+      font-size: 10px;
+    }
+    .z-tree-item::before { color: #858984; content: "▾"; }
+    .z-tree-item.folder::before { content: "▸"; }
+    .z-tree-item.active { background: #e7d6d5; color: #6f2323; font-weight: 680; }
+    .z-tree-item.indent { padding-left: 24px; }
+    .z-paper-item {
+      margin: 10px 8px 0;
+      padding: 10px;
+      border: 1px solid #d2c2c0;
+      border-radius: 6px;
+      background: #fff;
+    }
+    .z-paper-item small { display: block; margin-bottom: 4px; color: var(--zotero-red); font-size: 8px; font-weight: 760; letter-spacing: .1em; }
+    .z-paper-item strong { display: block; font-family: Georgia, serif; font-size: 11px; line-height: 1.3; }
+    .z-paper-item span { display: block; margin-top: 5px; color: #7b7e78; font-size: 9px; }
+
+    .z-reader {
+      display: grid;
+      min-width: 0;
+      min-height: 0;
+      grid-template-rows: 37px 1fr;
+      background: #cececc;
+    }
+    .z-document-tab {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 0 13px;
+      border-bottom: 1px solid #c4c4c2;
+      background: #f8f8f7;
+      color: #454945;
+      font-size: 10px;
+      font-weight: 650;
+    }
+    .z-document-tab span { color: var(--zotero-red); font-weight: 800; }
+    .z-reader-body {
+      display: grid;
+      min-height: 0;
+      grid-template-columns: 88px minmax(0, 1fr);
+    }
+    .z-thumbnails {
+      overflow-y: auto;
+      padding: 10px 9px;
+      border-right: 1px solid #bdbdbb;
+      background: #d9d9d7;
+    }
+    .z-thumb {
+      display: block;
+      width: 100%;
+      margin-bottom: 10px;
+      padding: 4px;
+      border: 2px solid transparent;
+      border-radius: 4px;
+      background: transparent;
+      cursor: pointer;
+    }
+    .z-thumb img { width: 100%; border: 1px solid #bfbfbd; background: #fff; }
+    .z-thumb span { display: block; margin-top: 4px; color: #626660; font-size: 8px; text-align: center; }
+    .z-thumb.is-active { border-color: var(--zotero-red); background: rgba(255,255,255,.45); }
+    .z-page-scroll {
+      overflow: auto;
+      padding: 24px clamp(18px, 3vw, 42px) 60px;
+      scroll-behavior: smooth;
+      background: #bfc0be;
+    }
+    .z-page {
+      position: relative;
+      width: min(820px, 100%);
+      margin: 0 auto 28px;
+      border: 1px solid #aaa;
+      background: #fff;
+      box-shadow: 0 6px 18px rgba(0,0,0,.16);
+    }
+    .z-page img { width: 100%; }
+    .z-page-number {
+      position: absolute;
+      right: 10px;
+      bottom: -22px;
+      color: #5f635e;
+      font-size: 9px;
+    }
+    .page-highlight {
+      position: absolute;
+      z-index: 2;
+      border: 0;
+      border-radius: 2px;
+      background: rgba(247, 221, 64, .28);
+      box-shadow: 0 0 0 1px rgba(219,174,17,.18);
+      cursor: pointer;
+    }
+    .page-highlight:hover, .page-highlight:focus-visible { background: rgba(247, 221, 64, .45); outline: 2px solid rgba(185,130,18,.5); }
+    .highlight-global { top: 39.3%; left: 13.4%; width: 72.3%; height: 8.7%; }
+    .highlight-equation { top: 50.4%; left: 27%; width: 47%; height: 4.3%; }
+    .highlight-multi { top: 11.8%; left: 13.5%; width: 72%; height: 6.2%; }
+
+    .z-notes {
+      min-width: 0;
+      overflow: auto;
+      border-left: 1px solid #cdcdca;
+      background: #fafaf9;
+    }
+    .z-note-tabs { display: flex; gap: 2px; border-bottom: 1px solid #e0e0dd; }
+    .z-note-tabs button {
+      flex: 1;
+      min-height: 34px;
+      padding: 0 8px;
+      border: 0;
+      border-bottom: 2px solid transparent;
+      background: transparent;
+      color: #777b75;
+      font-size: 9px;
+      cursor: pointer;
+    }
+    .z-note-tabs button:hover { background: #f3f3f1; }
+    .z-note-tabs button.is-active { border-bottom-color: var(--zotero-red); color: var(--zotero-red); font-weight: 700; }
+    .z-note-list { padding: 10px; }
+    .z-note {
+      display: block;
+      width: 100%;
+      margin-bottom: 9px;
+      padding: 10px;
+      border: 1px solid #ddd9ce;
+      border-left: 4px solid #edcf43;
+      border-radius: 4px;
+      background: #fff;
+      text-align: left;
+      cursor: pointer;
+    }
+    .z-note:hover, .z-note.is-current { border-color: #c9b75a; background: #fffdf1; }
+    .z-note small { color: #777c75; font-size: 8px; font-weight: 700; }
+    .z-note p { margin: 6px 0 0; color: #40443f; font-family: Georgia, serif; font-size: 11px; line-height: 1.45; }
+    .z-note-comment { margin-top: 6px; color: #777b75; font-size: 9px; line-height: 1.45; }
+    .z-translate-panel { padding: 10px; }
+    .z-plugin-heading {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 9px;
+    }
+    .z-plugin-heading strong { color: #424642; font-size: 10px; }
+    .z-plugin-heading span { color: #8a8e88; font-size: 8px; }
+    .z-language-row {
+      display: grid;
+      grid-template-columns: 1fr 24px 1fr;
+      align-items: center;
+      gap: 4px;
+      margin-bottom: 8px;
+    }
+    .z-language-row select {
+      width: 100%;
+      height: 27px;
+      border: 1px solid #d1d1ce;
+      border-radius: 4px;
+      background: #fff;
+      color: #4e524d;
+      font: 9px var(--ui);
+    }
+    .z-language-swap {
+      display: grid;
+      width: 24px;
+      height: 24px;
+      place-items: center;
+      border: 1px solid #d2d2cf;
+      border-radius: 4px;
+      background: #f7f7f5;
+      color: #6b7069;
+      font-size: 10px;
+    }
+    .z-auto-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 7px 10px;
+      margin-bottom: 9px;
+      color: #666b65;
+      font-size: 8px;
+    }
+    .z-auto-row strong { color: #4e534d; }
+    .z-auto-row label { display: inline-flex; align-items: center; gap: 3px; }
+    .z-auto-row input { width: 11px; height: 11px; margin: 0; accent-color: var(--zotero-red); }
+    .z-field-label {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin: 9px 0 4px;
+      color: #747973;
+      font-size: 8px;
+      font-weight: 700;
+    }
+    .z-field-label span { color: #9a9e98; font-weight: 500; }
+    .z-textbox {
+      min-height: 112px;
+      max-height: 165px;
+      overflow: auto;
+      padding: 9px;
+      border: 1px solid #d7d7d4;
+      border-radius: 5px;
+      background: #fff;
+      color: #40443f;
+      font-family: Georgia, "Songti SC", serif;
+      font-size: 10px;
+      line-height: 1.52;
+      white-space: pre-wrap;
+    }
+    .z-textbox.result { border-color: #d6c2c1; background: #fffdfd; color: #3f403d; }
+    .z-translate-status {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-top: 8px;
+      color: #777c76;
+      font-size: 8px;
+    }
+    .z-translate-status::before { width: 6px; height: 6px; border-radius: 50%; background: #66a568; content: ""; }
+    .z-copy-row { display: flex; gap: 4px; margin-top: 8px; }
+    .z-copy-row button {
+      flex: 1;
+      min-height: 26px;
+      border: 1px solid #d4d4d1;
+      border-radius: 4px;
+      background: linear-gradient(#fff, #f4f4f2);
+      color: #5c615b;
+      font-size: 8px;
+      cursor: pointer;
+    }
+    .z-copy-row button:hover { border-color: #bdbdb9; background: #fff; }
+    .third-party-note {
+      margin: 12px;
+      padding: 10px;
+      border-radius: 6px;
+      background: var(--zotero-soft);
+      color: #755a58;
+      font-size: 9px;
+      line-height: 1.5;
+    }
+
+    .bridge {
+      display: grid;
+      grid-template-columns: minmax(0, .85fr) minmax(0, 1.15fr);
+      gap: 70px;
+      align-items: center;
+      margin: 0 0 128px;
+      padding: 58px clamp(32px, 6vw, 88px);
+      border: 1px solid var(--line);
+      border-radius: 24px;
+      background: var(--green-deep);
+      box-shadow: var(--shadow);
+      color: #f8f8f2;
+    }
+    .bridge small { color: #bfcdbf; font-size: 10px; font-weight: 750; letter-spacing: .16em; }
+    .bridge h2 {
+      margin: 14px 0 0;
+      font-family: var(--serif);
+      font-size: clamp(36px, 4.2vw, 62px);
+      font-weight: 500;
+      letter-spacing: -.035em;
+      line-height: 1.05;
+    }
+    .bridge-steps { display: grid; gap: 12px; }
+    .bridge-step {
+      display: grid;
+      grid-template-columns: 40px 1fr;
+      gap: 14px;
+      padding: 15px 0;
+      border-bottom: 1px solid rgba(255,255,255,.15);
+    }
+    .bridge-step:last-child { border-bottom: 0; }
+    .bridge-step span {
+      display: grid;
+      width: 34px;
+      height: 34px;
+      place-items: center;
+      border: 1px solid rgba(255,255,255,.25);
+      border-radius: 50%;
+      color: #dce5db;
+      font-family: var(--serif);
+      font-size: 13px;
+    }
+    .bridge-step strong { display: block; font-family: var(--serif); font-size: 19px; font-weight: 540; }
+    .bridge-step p { margin: 4px 0 0; color: #c7d1c6; font-size: 11px; line-height: 1.55; }
+
+    .scholar-window { position: relative; background: #eef0ea; }
+    .scholar-window .window-titlebar { background: #eeeee9; }
+    .scholar-tabs {
+      display: flex;
+      min-height: 42px;
+      align-items: stretch;
+      border-bottom: 1px solid #d9dcd5;
+      background: #f5f5f1;
+    }
+    .scholar-home {
+      display: flex;
+      width: 176px;
+      align-items: center;
+      gap: 7px;
+      padding: 0 12px;
+      border-right: 1px solid #dfe1dc;
+      font-size: 10px;
+      font-weight: 700;
+    }
+    .scholar-home img { width: 21px; height: 21px; border-radius: 5px; }
+    .scholar-doc-tab {
+      display: flex;
+      max-width: 390px;
+      align-items: center;
+      gap: 8px;
+      padding: 0 14px;
+      border-right: 1px solid #dfe1dc;
+      border-bottom: 2px solid var(--green);
+      background: #fff;
+      font-size: 10px;
+    }
+    .scholar-doc-tab span { color: var(--red); font-size: 9px; font-weight: 800; }
+    .scholar-actionbar {
+      display: grid;
+      min-height: 45px;
+      grid-template-columns: 290px 1fr 250px;
+      align-items: center;
+      border-bottom: 1px solid #d9dcd5;
+      background: rgba(250,250,247,.96);
+    }
+    .assistant-label {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 0 13px;
+      color: #3c443c;
+      font-size: 11px;
+      font-weight: 690;
+    }
+    .assistant-mark {
+      display: grid;
+      width: 22px;
+      height: 22px;
+      place-items: center;
+      border: 1px solid #aeb6aa;
+      border-radius: 5px;
+      color: var(--green);
+      font-size: 8px;
+      font-weight: 800;
+    }
+    .reader-actions {
+      display: flex;
+      min-width: 0;
+      align-items: center;
+      justify-content: center;
+      gap: 4px;
+      overflow-x: auto;
+      padding: 0 8px;
+    }
+    .reader-tool {
+      min-height: 29px;
+      padding: 0 9px;
+      border: 1px solid transparent;
+      border-radius: 6px;
+      background: transparent;
+      color: #4e584f;
+      font-size: 10px;
+      white-space: nowrap;
+      cursor: pointer;
+    }
+    .reader-tool:hover, .reader-tool[aria-pressed="true"] { border-color: #ced5cb; background: #edf1ea; color: var(--green-deep); }
+    .knowledge-summary {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 8px;
+      padding: 0 13px;
+      color: #596159;
+      font-size: 10px;
+    }
+    .clue-count {
+      display: inline-grid;
+      min-width: 23px;
+      height: 23px;
+      place-items: center;
+      border-radius: 999px;
+      background: var(--green-deep);
+      color: #fff;
+      font-size: 9px;
+      font-weight: 760;
+    }
+    .translation-progress-demo {
+      position: absolute;
+      z-index: 90;
+      bottom: 24px;
+      left: 50%;
+      display: grid;
+      width: min(440px, calc(100% - 34px));
+      grid-template-columns: 1fr auto;
+      gap: 7px 14px;
+      padding: 11px 14px;
+      border: 1px solid #cfd5cc;
+      border-radius: 11px;
+      background: rgba(250,251,248,.96);
+      box-shadow: 0 16px 42px rgba(37,49,39,.2);
+      color: #4c564e;
+      font-size: 9px;
+      transform: translateX(-50%);
+      backdrop-filter: blur(16px);
+    }
+    .translation-progress-demo strong { font-size: 10px; }
+    .translation-progress-track {
+      grid-column: 1 / -1;
+      height: 6px;
+      overflow: hidden;
+      border-radius: 999px;
+      background: #e4e8e1;
+    }
+    .translation-progress-track span {
+      display: block;
+      width: 0;
+      height: 100%;
+      border-radius: inherit;
+      background: var(--green);
+      transition: width .28s ease;
+    }
+
+    .scholar-grid {
+      display: grid;
+      height: min(860px, calc(100vh - 86px));
+      min-height: 680px;
+      grid-template-columns: 290px minmax(540px, 1fr) 310px;
+      background: #e9ebe6;
+    }
+    .assistant-panel {
+      min-width: 0;
+      overflow: hidden;
+      border-right: 1px solid #d6dad3;
+      background: #f6f7f3;
+    }
+    .assistant-tabs {
+      display: flex;
+      min-height: 42px;
+      overflow-x: auto;
+      border-bottom: 1px solid #dde0da;
+      padding: 0 7px;
+    }
+    .assistant-tab {
+      position: relative;
+      flex: 1 0 auto;
+      padding: 0 7px;
+      border: 0;
+      background: transparent;
+      color: #737a72;
+      font-size: 9px;
+      cursor: pointer;
+    }
+    .assistant-tab::after {
+      position: absolute;
+      right: 6px;
+      bottom: 0;
+      left: 6px;
+      height: 2px;
+      border-radius: 2px;
+      background: transparent;
+      content: "";
+    }
+    .assistant-tab.is-active { color: #29332b; font-weight: 700; }
+    .assistant-tab.is-active::after { background: var(--green); }
+    .assistant-body { height: calc(100% - 42px); overflow: auto; padding: 14px; }
+    .assistant-intro { margin-bottom: 14px; }
+    .assistant-intro strong { display: block; font-family: var(--serif); font-size: 18px; font-weight: 560; }
+    .assistant-intro span { display: block; margin-top: 4px; color: var(--muted); font-size: 9px; line-height: 1.45; }
+    .scholar-outline { display: grid; gap: 3px; }
+    .outline-link {
+      display: grid;
+      grid-template-columns: 24px 1fr auto;
+      align-items: center;
+      gap: 7px;
+      padding: 9px 8px;
+      border: 0;
+      border-radius: 7px;
+      background: transparent;
+      color: #4c554d;
+      text-align: left;
+      cursor: pointer;
+    }
+    .outline-link:hover, .outline-link.is-current { background: #e9eee6; color: var(--green-deep); }
+    .outline-link span:first-child { color: #9aa198; font-family: var(--serif); font-size: 10px; }
+    .outline-link strong { overflow: hidden; font-size: 10px; font-weight: 640; text-overflow: ellipsis; white-space: nowrap; }
+    .outline-link small { color: #8a9189; font-size: 8px; }
+    .highlight-panel-list { display: grid; gap: 8px; }
+    .assistant-highlight {
+      padding: 10px;
+      border: 1px solid #daddd6;
+      border-left: 3px solid var(--amber);
+      border-radius: 7px;
+      background: #fff;
+    }
+    .assistant-highlight small { color: var(--amber); font-size: 8px; font-weight: 780; letter-spacing: .09em; }
+    .assistant-highlight strong { display: block; margin-top: 4px; font-family: var(--serif); font-size: 12px; font-weight: 580; line-height: 1.4; }
+    .assistant-empty {
+      padding: 20px 12px;
+      border: 1px dashed #d7dad4;
+      border-radius: 8px;
+      color: #858b83;
+      font-size: 10px;
+      line-height: 1.6;
+      text-align: center;
+    }
+
+    .scholar-reader {
+      overflow: auto;
+      scroll-behavior: smooth;
+      background: #fffefb;
+    }
+    .scholar-paper {
+      width: min(830px, calc(100% - 44px));
+      margin: 0 auto;
+      padding: 58px clamp(26px, 6vw, 82px) 110px;
+      font-family: var(--serif);
+      font-size: 17px;
+      line-height: 1.76;
+    }
+    .paper-provenance {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 7px;
+      margin-bottom: 24px;
+      font-family: var(--ui);
+    }
+    .paper-provenance span {
+      padding: 5px 8px;
+      border-radius: 999px;
+      background: var(--green-soft);
+      color: var(--green-deep);
+      font-size: 8px;
+      font-weight: 760;
+      letter-spacing: .06em;
+    }
+    .paper-provenance span:last-child { background: #f1ede3; color: #706b60; }
+    .scholar-paper h1 {
+      margin: 0;
+      font-size: clamp(38px, 4.8vw, 60px);
+      font-weight: 540;
+      letter-spacing: -.035em;
+      line-height: 1.02;
+    }
+    .paper-authors { margin: 18px 0 0; color: #4f554f; font-size: 14px; line-height: 1.55; }
+    .paper-source-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 18px;
+      font-family: var(--ui);
+    }
+    .paper-source-row a, .source-page-button {
+      display: inline-flex;
+      min-height: 30px;
+      align-items: center;
+      padding: 0 10px;
+      border: 1px solid #d5d9d2;
+      border-radius: 7px;
+      background: #fff;
+      color: #5e675e;
+      font-size: 9px;
+      font-weight: 680;
+      text-decoration: none;
+      cursor: pointer;
+    }
+    .paper-source-row a:hover, .source-page-button:hover { border-color: #aeb8ab; color: var(--green-deep); }
+    .authenticity-note {
+      margin: 28px 0 42px;
+      padding: 13px 15px;
+      border-left: 3px solid var(--green);
+      background: #f1f5ef;
+      color: #586058;
+      font-family: var(--ui);
+      font-size: 10px;
+      line-height: 1.65;
+    }
+    .reflow-section { scroll-margin-top: 24px; margin: 0 0 48px; }
+    .source-label {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      margin-bottom: 10px;
+      font-family: var(--ui);
+    }
+    .source-label span { color: var(--green); font-size: 8px; font-weight: 800; letter-spacing: .13em; }
+    .source-label button { flex: 0 0 auto; }
+    .scholar-paper h2 {
+      margin: 0 0 17px;
+      font-size: 29px;
+      font-weight: 570;
+      letter-spacing: -.022em;
+      line-height: 1.18;
+    }
+    .scholar-paper h3 {
+      margin: 30px 0 12px;
+      font-size: 21px;
+      font-weight: 600;
+      line-height: 1.25;
+    }
+    .scholar-paper p { margin: 0 0 16px; }
+    .scholar-paper .abstract {
+      margin: 18px 0 0;
+      padding: 22px 25px;
+      border: 1px solid #e1e1db;
+      border-radius: 10px;
+      background: #faf9f4;
+      font-size: 15px;
+    }
+    .my-scholar-translation-demo {
+      display: none;
+      margin: -8px 0 18px;
+      padding: 3px 0 3px 14px;
+      border-left: 2px solid rgba(207,139,49,.65);
+      color: #495047;
+      font-family: var(--serif);
+      font-size: .94em;
+      line-height: 1.72;
+    }
+    .my-scholar-translation-demo p { margin: 0; }
+    .my-scholar-translation-demo small {
+      display: block;
+      margin-bottom: 4px;
+      color: #a36c26;
+      font-family: var(--ui);
+      font-size: 8px;
+      font-weight: 760;
+      letter-spacing: .08em;
+    }
+    .scholar-window.translations-visible .my-scholar-translation-demo { display: block; }
+    .scholar-window.translations-visible .paper-title-translation { margin: 9px 0 18px; padding-left: 0; border-left: 0; font-size: 1.22em; }
+    .scholar-window.translations-visible .caption-translation { margin-top: 8px; }
+    .translation-disclosure {
+      margin: -26px 0 42px;
+      padding: 11px 14px;
+      border: 1px solid #e1d2bd;
+      border-radius: 8px;
+      background: #fbf4e8;
+      color: #75634c;
+      font-family: var(--ui);
+      font-size: 9px;
+      line-height: 1.6;
+    }
+    .original-highlight {
+      margin: 19px -14px;
+      padding: 14px;
+      border-radius: 8px;
+      background: linear-gradient(90deg, rgba(242,210,91,.28), rgba(242,210,91,.08));
+      box-shadow: inset 3px 0 #d4a834;
+    }
+    .formula {
+      overflow-x: auto;
+      margin: 22px 0;
+      padding: 18px 22px;
+      border: 1px solid #dfe2dc;
+      border-radius: 10px;
+      background: #fbfbf8;
+      font-size: 21px;
+      text-align: center;
+      white-space: nowrap;
+    }
+    .formula small { margin-left: 18px; color: #6d736c; font-size: 12px; }
+    .source-figure {
+      margin: 22px 0 28px;
+      padding: 14px;
+      border: 1px solid #dedfd9;
+      border-radius: 12px;
+      background: #fff;
+    }
+    .source-figure img { width: 100%; }
+    .source-figure figcaption {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-top: 10px;
+      color: #747a72;
+      font-family: var(--ui);
+      font-size: 9px;
+      line-height: 1.45;
+    }
+    .source-figure figcaption strong { color: #4d554e; }
+    .paper-list { margin: 12px 0 18px 18px; padding: 0; }
+    .paper-list li { margin-bottom: 12px; padding-left: 4px; }
+    .clue-action {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 18px;
+      margin: 18px 0 24px;
+      padding: 14px 15px;
+      border: 1px solid #cfd8cd;
+      border-radius: 10px;
+      background: #f5f8f3;
+      font-family: var(--ui);
+    }
+    .clue-action div { min-width: 0; }
+    .clue-action small { display: block; color: var(--green); font-size: 8px; font-weight: 800; letter-spacing: .12em; }
+    .clue-action strong { display: block; margin-top: 4px; font-family: var(--serif); font-size: 14px; font-weight: 580; line-height: 1.4; }
+    .capture-clue {
+      flex: 0 0 auto;
+      min-height: 32px;
+      padding: 0 11px;
+      border: 1px solid var(--green);
+      border-radius: 7px;
+      background: var(--green);
+      color: #fff;
+      font-size: 9px;
+      font-weight: 720;
+      cursor: pointer;
+    }
+    .capture-clue:hover { background: var(--green-deep); }
+    .capture-clue.is-saved { border-color: #adb7aa; background: #e7ece4; color: var(--green-deep); }
+    .paper-boundary {
+      margin-top: 54px;
+      padding-top: 20px;
+      border-top: 1px solid #e0e1dc;
+      color: #777d75;
+      font-family: var(--ui);
+      font-size: 9px;
+      line-height: 1.65;
+    }
+
+    .knowledge-panel {
+      min-width: 0;
+      overflow: auto;
+      border-left: 1px solid #d6dad3;
+      background: #f5f6f2;
+    }
+    .knowledge-panel-inner { padding: 16px; }
+    .knowledge-kicker { color: var(--green); font-size: 8px; font-weight: 800; letter-spacing: .14em; }
+    .knowledge-panel h3 { margin: 7px 0 4px; font-family: var(--serif); font-size: 22px; font-weight: 560; }
+    .knowledge-lede { margin: 0; color: var(--muted); font-size: 9px; line-height: 1.55; }
+    .mini-graph {
+      position: relative;
+      height: 246px;
+      margin: 16px 0;
+      overflow: hidden;
+      border: 1px solid #daddd6;
+      border-radius: 12px;
+      background:
+        radial-gradient(circle at 50% 50%, rgba(73,99,79,.12), transparent 42%),
+        linear-gradient(#fbfcf9, #f0f3ed);
+    }
+    .graph-line {
+      position: absolute;
+      z-index: 1;
+      left: 50%;
+      top: 50%;
+      width: 0;
+      height: 1px;
+      background: #b6beb2;
+      transform-origin: left center;
+      transition: width .35s ease;
+    }
+    .graph-line.line-one { transform: rotate(-136deg); }
+    .graph-line.line-two { transform: rotate(-37deg); }
+    .graph-line.line-three { transform: rotate(142deg); }
+    .graph-line.line-four { transform: rotate(35deg); }
+    .mini-graph.has-global .line-one,
+    .mini-graph.has-figure .line-two,
+    .mini-graph.has-equation .line-three,
+    .mini-graph.has-multi .line-four { width: 86px; }
+    .graph-node {
+      position: absolute;
+      z-index: 2;
+      display: grid;
+      min-width: 66px;
+      min-height: 38px;
+      place-items: center;
+      padding: 6px 8px;
+      border: 1px solid #ccd3ca;
+      border-radius: 999px;
+      background: #fff;
+      color: #7a8179;
+      font-size: 8px;
+      font-weight: 680;
+      line-height: 1.2;
+      text-align: center;
+      opacity: .48;
+      transition: opacity .25s ease, border-color .25s ease, color .25s ease, transform .25s ease;
+    }
+    .graph-node.main {
+      left: 50%;
+      top: 50%;
+      min-width: 92px;
+      min-height: 52px;
+      border-color: var(--green);
+      background: var(--green-deep);
+      color: #fff;
+      opacity: 1;
+      transform: translate(-50%, -50%);
+    }
+    .graph-node.global { left: 8px; top: 35px; }
+    .graph-node.figure { right: 8px; top: 32px; }
+    .graph-node.equation { left: 8px; bottom: 32px; }
+    .graph-node.multi { right: 8px; bottom: 32px; }
+    .mini-graph.has-global .global,
+    .mini-graph.has-figure .figure,
+    .mini-graph.has-equation .equation,
+    .mini-graph.has-multi .multi {
+      border-color: var(--green);
+      color: var(--green-deep);
+      opacity: 1;
+      transform: scale(1.03);
+    }
+    .clue-list-title {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin: 18px 0 8px;
+      color: #555e56;
+      font-size: 9px;
+      font-weight: 760;
+    }
+    .captured-clues { display: grid; gap: 8px; }
+    .captured-placeholder {
+      padding: 16px 12px;
+      border: 1px dashed #ccd2c9;
+      border-radius: 8px;
+      color: #858c84;
+      font-size: 9px;
+      line-height: 1.55;
+      text-align: center;
+    }
+    .captured-card {
+      padding: 10px;
+      border: 1px solid #d6dbd3;
+      border-radius: 8px;
+      background: #fff;
+      animation: clue-in .35s ease both;
+    }
+    @keyframes clue-in { from { opacity: 0; transform: translateY(8px); } }
+    .captured-card small { color: var(--green); font-size: 7px; font-weight: 800; letter-spacing: .1em; }
+    .captured-card strong { display: block; margin-top: 4px; font-family: var(--serif); font-size: 12px; font-weight: 580; line-height: 1.35; }
+    .captured-card span { display: block; margin-top: 4px; color: #818780; font-size: 8px; }
+    .knowledge-truth {
+      margin-top: 14px;
+      padding: 10px;
+      border-radius: 8px;
+      background: #e9eee6;
+      color: #5f685f;
+      font-size: 8px;
+      line-height: 1.55;
+    }
+    .scholar-window.focus-mode .assistant-panel,
+    .scholar-window.focus-mode .knowledge-panel { display: none; }
+    .scholar-window.focus-mode .scholar-grid { grid-template-columns: minmax(0, 1fr); }
+    .scholar-window.focus-mode .scholar-actionbar { grid-template-columns: 1fr; }
+    .scholar-window.focus-mode .assistant-label,
+    .scholar-window.focus-mode .knowledge-summary { display: none; }
+
+    .comparison {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      overflow: hidden;
+      margin-bottom: 80px;
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      background: rgba(255,255,255,.66);
+      box-shadow: var(--shadow-soft);
+    }
+    .compare-column { padding: clamp(28px, 4vw, 52px); }
+    .compare-column + .compare-column { border-left: 1px solid var(--line); background: rgba(232,238,229,.48); }
+    .compare-label { color: var(--muted); font-size: 9px; font-weight: 800; letter-spacing: .15em; }
+    .compare-column:last-child .compare-label { color: var(--green); }
+    .compare-column h2 { margin: 12px 0 26px; font-family: var(--serif); font-size: 32px; font-weight: 550; }
+    .compare-row {
+      display: grid;
+      grid-template-columns: 92px 1fr;
+      gap: 14px;
+      padding: 14px 0;
+      border-top: 1px solid var(--line);
+    }
+    .compare-row strong { color: #646a63; font-size: 10px; }
+    .compare-row span { font-family: var(--serif); font-size: 15px; line-height: 1.55; }
+    .fairness-note {
+      grid-column: 1 / -1;
+      padding: 15px 22px;
+      border-top: 1px solid var(--line);
+      background: #f5f2ea;
+      color: #6e7069;
+      font-size: 10px;
+      line-height: 1.6;
+    }
+
+    .closing {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      align-items: center;
+      gap: 36px;
+      margin-bottom: 80px;
+      padding: 44px clamp(30px, 5vw, 66px);
+      border-radius: 22px;
+      background: #232a24;
+      color: #f7f6ef;
+    }
+    .closing small { color: #aebbad; font-size: 9px; font-weight: 800; letter-spacing: .15em; }
+    .closing h2 { max-width: 800px; margin: 10px 0 0; font-family: var(--serif); font-size: clamp(32px, 4vw, 54px); font-weight: 500; line-height: 1.05; }
+    .closing .primary-action { border-color: #f0f3ec; background: #f0f3ec; color: #263028; }
+
+    .source-dialog {
+      width: min(960px, calc(100% - 30px));
+      max-height: calc(100vh - 30px);
+      padding: 0;
+      overflow: hidden;
+      border: 1px solid rgba(255,255,255,.25);
+      border-radius: 16px;
+      background: #222521;
+      box-shadow: 0 30px 100px rgba(0,0,0,.45);
+      color: #fff;
+    }
+    .source-dialog::backdrop { background: rgba(21,24,20,.78); backdrop-filter: blur(6px); }
+    .dialog-head {
+      display: flex;
+      min-height: 50px;
+      align-items: center;
+      gap: 12px;
+      padding: 0 15px;
+      border-bottom: 1px solid rgba(255,255,255,.13);
+    }
+    .dialog-head strong { font-size: 11px; }
+    .dialog-head span { color: #adb4ac; font-size: 9px; }
+    .dialog-close {
+      width: 29px;
+      height: 29px;
+      margin-left: auto;
+      border: 1px solid rgba(255,255,255,.2);
+      border-radius: 7px;
+      background: transparent;
+      color: #fff;
+      cursor: pointer;
+    }
+    .dialog-body { max-height: calc(100vh - 82px); overflow: auto; padding: 18px; }
+    .dialog-body img { width: min(760px, 100%); margin: 0 auto; background: #fff; }
+    .toast {
+      position: fixed;
+      z-index: 300;
+      right: 22px;
+      bottom: 22px;
+      max-width: min(340px, calc(100% - 44px));
+      padding: 12px 15px;
+      border: 1px solid rgba(255,255,255,.25);
+      border-radius: 10px;
+      background: var(--green-deep);
+      box-shadow: 0 16px 40px rgba(26,42,31,.25);
+      color: #fff;
+      font-size: 10px;
+      line-height: 1.5;
+      opacity: 0;
+      pointer-events: none;
+      transform: translateY(10px);
+      transition: opacity .2s ease, transform .2s ease;
+    }
+    .toast.is-visible { opacity: 1; transform: translateY(0); }
+
+    @media (max-width: 1220px) {
+      .page-shell { width: min(1180px, calc(100% - 32px)); }
+      .section-heading { grid-template-columns: 110px 1fr; }
+      .section-heading p { grid-column: 2; justify-self: start; }
+      .zotero-grid { grid-template-columns: 170px minmax(480px, 1fr) 240px; }
+      .scholar-actionbar { grid-template-columns: 240px 1fr 210px; }
+      .scholar-grid { grid-template-columns: 240px minmax(500px, 1fr) 270px; }
+      .scholar-paper { width: calc(100% - 24px); padding-right: 44px; padding-left: 44px; }
+    }
+    @media (max-width: 980px) {
+      .topbar { grid-template-columns: 1fr auto; }
+      .topnav { display: none; }
+      .hero { grid-template-columns: 1fr; }
+      .hero-proof { min-height: 480px; }
+      .truth-band { grid-template-columns: 1fr; }
+      .truth-item + .truth-item { border-top: 1px solid var(--line); border-left: 0; }
+      .section-heading { grid-template-columns: 1fr; }
+      .section-heading p { grid-column: auto; }
+      .zotero-grid { height: auto; min-height: 0; grid-template-columns: 1fr; }
+      .z-library, .z-notes { max-height: 260px; border: 0; border-bottom: 1px solid #d2d2cf; }
+      .z-reader { height: 760px; }
+      .bridge { grid-template-columns: 1fr; gap: 34px; }
+      .scholar-actionbar { grid-template-columns: 1fr; padding: 6px 0; }
+      .assistant-label, .knowledge-summary { display: none; }
+      .scholar-grid { height: auto; min-height: 0; grid-template-columns: 1fr; }
+      .assistant-panel, .knowledge-panel { max-height: 360px; border: 0; border-bottom: 1px solid #d6dad3; }
+      .scholar-reader { height: 850px; }
+      .knowledge-panel { border-top: 1px solid #d6dad3; }
+      .comparison { grid-template-columns: 1fr; }
+      .compare-column + .compare-column { border-top: 1px solid var(--line); border-left: 0; }
+    }
+    @media (max-width: 680px) {
+      .topbar { min-height: 58px; padding: 0 14px; }
+      .brand-copy small, .top-actions .top-link:first-child { display: none; }
+      .page-shell { width: min(100% - 20px, 650px); }
+      .hero { min-height: auto; padding: 58px 0 64px; }
+      .hero h1 { font-size: clamp(45px, 15vw, 68px); }
+      .hero-proof { min-height: 370px; }
+      .proof-paper { width: 76%; }
+      .proof-seal { width: 100px; height: 100px; }
+      .proof-seal strong { font-size: 17px; }
+      .truth-band { margin-bottom: 80px; }
+      .showcase-section { padding-bottom: 90px; }
+      .section-heading h2 { font-size: 39px; }
+      .app-window { border-radius: 14px; }
+      .window-titlebar { grid-template-columns: 1fr auto; }
+      .window-status { display: none; }
+      .zotero-toolbar { overflow-x: auto; }
+      .z-search { display: none; }
+      .z-reader { height: 660px; }
+      .z-reader-body { grid-template-columns: 62px minmax(0, 1fr); }
+      .z-page-scroll { padding: 14px 10px 45px; }
+      .bridge { padding: 38px 24px; }
+      .scholar-doc-tab { max-width: calc(100% - 145px); }
+      .scholar-home { width: 145px; }
+      .reader-actions { justify-content: flex-start; }
+      .scholar-reader { height: 780px; }
+      .scholar-paper { width: 100%; padding: 38px 21px 80px; font-size: 16px; }
+      .scholar-paper h1 { font-size: 42px; }
+      .source-label { align-items: flex-start; }
+      .clue-action { align-items: flex-start; flex-direction: column; }
+      .capture-clue { width: 100%; }
+      .formula { padding: 14px 8px; font-size: 17px; }
+      .source-figure { margin-right: -8px; margin-left: -8px; padding: 8px; }
+      .closing { grid-template-columns: 1fr; }
+      .compare-row { grid-template-columns: 1fr; gap: 5px; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      html { scroll-behavior: auto; }
+      *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; scroll-behavior: auto !important; transition-duration: .01ms !important; }
+    }
+  </style>
+</head>
+<body>
+  <a class="skip-link" href="#demo-content">跳到 Demo 内容</a>
+
+  <header class="topbar">
+    <a class="brand" href="../../webseit/landing.html" data-server-href="/" aria-label="返回谷子学术展示页">
+      <img src="assets/app-icon.png" alt="">
+      <span class="brand-copy"><strong>谷子学术</strong><small>GUZI SCHOLAR</small></span>
+    </a>
+    <nav class="topnav" aria-label="Demo 章节">
+      <a href="#zotero-demo">先看 Zotero</a>
+      <a href="#scholar-demo">再看谷子学术</a>
+      <a href="#difference">查看差异</a>
+    </nav>
+    <div class="top-actions">
+      <a class="top-link" href="assets/demo/attention/attention-is-all-you-need-pages-1-5.pdf" target="_blank">前 5 页 PDF ↗</a>
+      <a class="top-link" href="https://arxiv.org/abs/1706.03762" target="_blank" rel="noreferrer">arXiv ↗</a>
+    </div>
+  </header>
+
+  <main class="page-shell" id="demo-content">
+    <section class="hero" aria-labelledby="demo-title">
+      <div>
+        <span class="eyebrow">REAL PAPER · REAL READING WORKFLOW</span>
+        <h1 id="demo-title">同一篇真实论文，<em>两种阅读路径。</em></h1>
+        <p class="hero-lede">不再用重新编写的摘要代替论文。下面完整保留《Attention Is All You Need》前 5 页：先体验 Zotero 插件式选区翻译，再点击谷子学术“全文翻译”，观察同一原文如何进入连续双语阅读与线索关联。</p>
+        <div class="hero-actions">
+          <a class="primary-action" href="#zotero-demo">从 Zotero 开始 <span aria-hidden="true">↓</span></a>
+          <a class="secondary-action" href="#scholar-demo">直接看谷子学术</a>
+        </div>
+        <div class="source-facts" aria-label="论文素材说明">
+          <span>官方 arXiv PDF</span>
+          <span>原始第 1–5 页</span>
+          <span>真实原文 · 对照译文</span>
+          <span>无改写正文</span>
+        </div>
+      </div>
+      <div class="hero-proof" aria-label="论文真实页面预览">
+        <div class="proof-paper"><img src="assets/demo/attention/page-01.png" alt="Attention Is All You Need 原始 PDF 第 1 页"></div>
+        <div class="proof-paper"><img src="assets/demo/attention/page-04.png" alt="Attention Is All You Need 原始 PDF 第 4 页"></div>
+        <div class="proof-seal"><strong>Pages<br>1—5</strong><small>ORIGINAL PDF</small></div>
+      </div>
+    </section>
+
+    <section class="truth-band" aria-label="Demo 内容边界">
+      <article class="truth-item">
+        <small>01 / SOURCE</small>
+        <strong>真实论文页面</strong>
+        <p>页面来自下载保存的 arXiv v7 PDF，不以生成内容替代原文。</p>
+      </article>
+      <article class="truth-item">
+        <small>02 / SAME EVIDENCE</small>
+        <strong>同一份前五页</strong>
+        <p>两个阅读场景使用完全相同的标题、正文、图表、公式与页码。</p>
+      </article>
+      <article class="truth-item">
+        <small>03 / FAIR COMPARISON</small>
+        <strong>比较工作流，而非造结论</strong>
+        <p>页面只展示交互重心差异，不宣称第三方产品缺少其已有能力。</p>
+      </article>
+    </section>
+
+    <section class="showcase-section" id="zotero-demo" aria-labelledby="zotero-title">
+      <header class="section-heading">
+        <span class="section-index">01 / FIRST</span>
+        <h2 id="zotero-title">在 Zotero 中，先面对的是 PDF 页面。</h2>
+        <p>下面按本机 Translate for Zotero 2.4.5 还原插件式翻译：左侧文献库、中间真实 PDF、右侧选区与译文面板。点击第 2、4、5 页的黄色选区即可切换真实原文及对应中文。</p>
+      </header>
+
+      <div class="app-window" aria-label="Zotero 阅读工作流演示">
+        <div class="window-titlebar">
+          <div class="traffic-lights" aria-hidden="true"><span></span><span></span><span></span></div>
+          <span class="window-title">Zotero · My Library</span>
+          <span class="window-status">Independent workflow reconstruction</span>
+        </div>
+        <div class="zotero-toolbar">
+          <span class="z-app-mark" aria-hidden="true">Z</span>
+          <button class="z-tool" type="button">New Item</button>
+          <button class="z-tool" type="button">Add Note</button>
+          <button class="z-tool" type="button">Locate</button>
+          <input class="z-search" type="search" value="Attention Is All You Need" aria-label="Zotero 演示搜索框" readonly>
+        </div>
+        <div class="zotero-grid">
+          <aside class="z-library" aria-label="Zotero 文献库演示">
+            <div class="z-library-head"><span>LIBRARIES</span><span>＋</span></div>
+            <div class="z-tree">
+              <div class="z-tree-item">My Library</div>
+              <div class="z-tree-item indent">My Publications</div>
+              <div class="z-tree-item folder active">Transformer</div>
+              <div class="z-tree-item folder">Language Models</div>
+              <div class="z-tree-item folder">Reading Queue</div>
+              <div class="z-tree-item">Duplicate Items</div>
+              <div class="z-paper-item">
+                <small>PDF · 2017</small>
+                <strong>Attention Is All You Need</strong>
+                <span>Vaswani et al. · NeurIPS</span>
+              </div>
+            </div>
+          </aside>
+
+          <section class="z-reader" aria-label="真实论文 PDF 阅读区">
+            <div class="z-document-tab"><span>PDF</span> Attention Is All You Need.pdf</div>
+            <div class="z-reader-body">
+              <nav class="z-thumbnails" aria-label="前五页缩略图">
+                <button class="z-thumb is-active" type="button" data-z-page="1"><img src="assets/demo/attention/page-01.png" alt=""><span>1</span></button>
+                <button class="z-thumb" type="button" data-z-page="2"><img src="assets/demo/attention/page-02.png" alt=""><span>2</span></button>
+                <button class="z-thumb" type="button" data-z-page="3"><img src="assets/demo/attention/page-03.png" alt=""><span>3</span></button>
+                <button class="z-thumb" type="button" data-z-page="4"><img src="assets/demo/attention/page-04.png" alt=""><span>4</span></button>
+                <button class="z-thumb" type="button" data-z-page="5"><img src="assets/demo/attention/page-05.png" alt=""><span>5</span></button>
+              </nav>
+              <div class="z-page-scroll" id="z-page-scroll" tabindex="0" aria-label="论文原始页面，可滚动查看第 1 到第 5 页">
+                <figure class="z-page" id="z-page-1" data-page="1"><img src="assets/demo/attention/page-01.png" alt="Attention Is All You Need 原始 PDF 第 1 页"><figcaption class="z-page-number">Page 1 / 5</figcaption></figure>
+                <figure class="z-page" id="z-page-2" data-page="2">
+                  <img src="assets/demo/attention/page-02.png" alt="Attention Is All You Need 原始 PDF 第 2 页">
+                  <button class="page-highlight highlight-global" type="button" data-z-note="global" aria-label="查看第 2 页关于 global dependencies 的批注"></button>
+                  <figcaption class="z-page-number">Page 2 / 5</figcaption>
+                </figure>
+                <figure class="z-page" id="z-page-3" data-page="3"><img src="assets/demo/attention/page-03.png" alt="Attention Is All You Need 原始 PDF 第 3 页"><figcaption class="z-page-number">Page 3 / 5</figcaption></figure>
+                <figure class="z-page" id="z-page-4" data-page="4">
+                  <img src="assets/demo/attention/page-04.png" alt="Attention Is All You Need 原始 PDF 第 4 页">
+                  <button class="page-highlight highlight-equation" type="button" data-z-note="equation" aria-label="查看第 4 页 Equation 1 的批注"></button>
+                  <figcaption class="z-page-number">Page 4 / 5</figcaption>
+                </figure>
+                <figure class="z-page" id="z-page-5" data-page="5">
+                  <img src="assets/demo/attention/page-05.png" alt="Attention Is All You Need 原始 PDF 第 5 页">
+                  <button class="page-highlight highlight-multi" type="button" data-z-note="multi" aria-label="查看第 5 页关于 representation subspaces 的批注"></button>
+                  <figcaption class="z-page-number">Page 5 / 5</figcaption>
+                </figure>
+              </div>
+            </div>
+          </section>
+
+          <aside class="z-notes" aria-label="Zotero 翻译与批注演示">
+            <div class="z-notes-head"><span>READER PANELS</span><span>Translate for Zotero</span></div>
+            <div class="z-note-tabs" role="tablist" aria-label="Zotero 侧栏面板">
+              <button class="is-active" type="button" role="tab" aria-selected="true" data-z-panel="translate">翻译</button>
+              <button type="button" role="tab" aria-selected="false" data-z-panel="annotations">批注</button>
+            </div>
+            <section class="z-translate-panel" data-z-panel-content="translate">
+              <div class="z-plugin-heading"><strong>Translate for Zotero</strong><span>v2.4.5 · 本机已安装</span></div>
+              <div class="z-language-row">
+                <select aria-label="源语言"><option>English</option></select>
+                <span class="z-language-swap" aria-hidden="true">⇄</span>
+                <select aria-label="目标语言"><option>中文（简体）</option></select>
+              </div>
+              <div class="z-auto-row"><strong>自动翻译：</strong><label><input type="checkbox" checked disabled>选择内容</label><label><input type="checkbox" disabled>注释</label></div>
+              <div class="z-field-label">选区 <span id="z-translation-page">Page 2</span></div>
+              <div class="z-textbox" id="z-source-text">In this work we propose the Transformer, a model architecture eschewing recurrence and instead relying entirely on an attention mechanism to draw global dependencies between input and output.</div>
+              <div class="z-field-label">结果 <span>English → 中文</span></div>
+              <div class="z-textbox result" id="z-result-text">在本文中，我们提出了 Transformer：一种摒弃循环结构、完全依赖注意力机制来建立输入与输出之间全局依赖关系的模型架构。</div>
+              <div class="z-translate-status">选区内容已自动翻译</div>
+              <div class="z-copy-row" aria-label="复制翻译内容"><button type="button" data-copy-z="source">源文本</button><button type="button" data-copy-z="result">结果</button><button type="button" data-copy-z="both">两者</button></div>
+            </section>
+            <div class="z-note-list" data-z-panel-content="annotations" hidden>
+              <button class="z-note" type="button" data-z-target="2" data-note-id="global">
+                <small>YELLOW HIGHLIGHT · PAGE 2</small>
+                <p>“relying entirely on an attention mechanism to draw global dependencies”</p>
+                <div class="z-note-comment">Introduction · highlighted in the PDF</div>
+              </button>
+              <button class="z-note" type="button" data-z-target="4" data-note-id="equation">
+                <small>YELLOW HIGHLIGHT · PAGE 4</small>
+                <p>Attention(Q, K, V) = softmax(QKᵀ / √dₖ)V</p>
+                <div class="z-note-comment">Equation 1 · Scaled Dot-Product Attention</div>
+              </button>
+              <button class="z-note" type="button" data-z-target="5" data-note-id="multi">
+                <small>YELLOW HIGHLIGHT · PAGE 5</small>
+                <p>“different representation subspaces at different positions”</p>
+                <div class="z-note-comment">Section 3.2.2 · Multi-Head Attention</div>
+              </button>
+            </div>
+            <p class="third-party-note">本机检测到 Translate for Zotero 2.4.5。这里按其“选择内容自动翻译、源文本/结果分栏”的面板行为还原；Zotero 和该插件均为第三方产品，本页不是官方截图或合作页面。</p>
+          </aside>
+        </div>
+      </div>
+    </section>
+
+    <section class="bridge" aria-label="从 PDF 页面到知识线索的转换">
+      <div>
+        <small>THE SHIFT</small>
+        <h2>差异不只是换一个阅读器外壳。</h2>
+      </div>
+      <div class="bridge-steps">
+        <article class="bridge-step"><span>01</span><div><strong>保留原页作为证据</strong><p>任何重排内容都能回到真实 PDF 页核对，不切断出处。</p></div></article>
+        <article class="bridge-step"><span>02</span><div><strong>全文译文直接跟随原文</strong><p>点击一次后，标题、段落与图注的中文依次插入，不需要逐个选择 PDF 片段。</p></div></article>
+        <article class="bridge-step"><span>03</span><div><strong>把正文变成连续内容</strong><p>标题、段落、图表和公式脱离翻页节奏，进入可调整的双语阅读排版。</p></div></article>
+        <article class="bridge-step"><span>04</span><div><strong>把批注变成有来源的线索</strong><p>线索携带页码、章节和内容类型，进入个人知识关系视图。</p></div></article>
+      </div>
+    </section>
+
+    <section class="showcase-section" id="scholar-demo" aria-labelledby="scholar-title">
+      <header class="section-heading">
+        <span class="section-index">02 / THEN</span>
+        <h2 id="scholar-title">在谷子学术中，页面仍在，但阅读对象变成了内容与线索。</h2>
+        <p>主阅读区只使用论文原文、原始公式和原图裁剪。点击工具栏“全文翻译”即可显示逐段中文；每段仍保留来源页码，并可继续收录进右侧个人知识库。</p>
+      </header>
+
+      <div class="app-window scholar-window" id="scholar-window" aria-label="谷子学术真实论文阅读演示">
+        <div class="window-titlebar">
+          <div class="traffic-lights" aria-hidden="true"><span></span><span></span><span></span></div>
+          <span class="window-title">谷子学术 · 本地论文阅读器</span>
+          <span class="window-status">Demo data stays in this page</span>
+        </div>
+        <div class="scholar-tabs">
+          <div class="scholar-home"><img src="assets/app-icon.png" alt=""><span>本地文献库</span></div>
+          <div class="scholar-doc-tab"><span>PDF</span> Attention Is All You Need</div>
+        </div>
+        <div class="scholar-actionbar">
+          <div class="assistant-label"><span class="assistant-mark">MS</span><span>阅读助手</span></div>
+          <div class="reader-actions" aria-label="谷子学术演示阅读工具">
+            <button class="reader-tool" type="button" id="font-down" aria-label="减小正文字号">A−</button>
+            <button class="reader-tool" type="button" id="font-up" aria-label="增大正文字号">A+</button>
+            <button class="reader-tool" type="button" id="full-translate-demo" aria-label="展示全文翻译效果" aria-pressed="false">文 · 全文翻译</button>
+            <button class="reader-tool" type="button" aria-pressed="true">✧ · AI 重排</button>
+            <button class="reader-tool" type="button">✦ · 重点高亮</button>
+            <button class="reader-tool" type="button" id="focus-toggle" aria-pressed="false">专注阅读</button>
+          </div>
+          <div class="knowledge-summary"><span>已收录线索</span><span class="clue-count" id="clue-count">0</span></div>
+        </div>
+
+        <div class="translation-progress-demo" id="translation-progress-demo" role="status" aria-live="polite" hidden>
+          <strong id="translation-progress-label">正在翻译全文</strong>
+          <span id="translation-progress-count">0 / 0 段</span>
+          <div class="translation-progress-track" role="progressbar" aria-label="全文翻译进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span id="translation-progress-bar"></span></div>
+        </div>
+
+        <div class="scholar-grid">
+          <aside class="assistant-panel" aria-label="谷子学术阅读助手">
+            <div class="assistant-tabs" role="tablist" aria-label="阅读助手面板">
+              <button class="assistant-tab is-active" type="button" role="tab" aria-selected="true" data-assistant-panel="outline">目录</button>
+              <button class="assistant-tab" type="button" role="tab" aria-selected="false" data-assistant-panel="highlights">阅读重点</button>
+              <button class="assistant-tab" type="button" role="tab" aria-selected="false" data-assistant-panel="notes">我的笔记</button>
+            </div>
+            <div class="assistant-body">
+              <section data-assistant-content="outline">
+                <div class="assistant-intro"><strong>论文目录</strong><span>按真实章节进入前 5 页的重排内容。</span></div>
+                <nav class="scholar-outline" aria-label="真实论文前五页目录">
+                  <button class="outline-link is-current" type="button" data-reader-target="paper-start"><span>00</span><strong>Title &amp; Abstract</strong><small>P1</small></button>
+                  <button class="outline-link" type="button" data-reader-target="introduction"><span>01</span><strong>Introduction</strong><small>P2</small></button>
+                  <button class="outline-link" type="button" data-reader-target="background"><span>02</span><strong>Background</strong><small>P2</small></button>
+                  <button class="outline-link" type="button" data-reader-target="architecture"><span>03</span><strong>Model Architecture</strong><small>P2–3</small></button>
+                  <button class="outline-link" type="button" data-reader-target="attention"><span>3.2</span><strong>Attention</strong><small>P3–4</small></button>
+                  <button class="outline-link" type="button" data-reader-target="multi-head"><span>3.2.2</span><strong>Multi-Head Attention</strong><small>P4–5</small></button>
+                  <button class="outline-link" type="button" data-reader-target="applications"><span>3.2.3</span><strong>Applications of Attention</strong><small>P5</small></button>
+                  <button class="outline-link" type="button" data-reader-target="feed-forward"><span>3.3</span><strong>Position-wise FFN</strong><small>P5</small></button>
+                </nav>
+              </section>
+              <section data-assistant-content="highlights" hidden>
+                <div class="assistant-intro"><strong>阅读重点</strong><span>以下条目全部来自当前论文真实原文、图表或公式。</span></div>
+                <div class="highlight-panel-list">
+                  <article class="assistant-highlight"><small>RESEARCH CLAIM · P2</small><strong>Global dependencies without recurrence</strong></article>
+                  <article class="assistant-highlight"><small>ARCHITECTURE · P3</small><strong>Encoder and decoder stacks in Figure 1</strong></article>
+                  <article class="assistant-highlight"><small>EQUATION · P4</small><strong>Scaled Dot-Product Attention</strong></article>
+                  <article class="assistant-highlight"><small>MECHANISM · P5</small><strong>Different representation subspaces</strong></article>
+                </div>
+              </section>
+              <section data-assistant-content="notes" hidden>
+                <div class="assistant-intro"><strong>我的笔记</strong><span>正式产品中的笔记和标注默认保存在当前设备。</span></div>
+                <div class="assistant-empty">此公开 Demo 不写入本地文献库。你收录的线索只会在当前页面临时显示。</div>
+              </section>
+            </div>
+          </aside>
+
+          <main class="scholar-reader" id="scholar-reader" tabindex="0" aria-label="Attention Is All You Need 原文连续阅读区">
+            <article class="scholar-paper">
+              <header id="paper-start" class="reflow-section" data-source-page="1">
+                <div class="paper-provenance"><span>REAL PDF CONTENT</span><span>ARXIV:1706.03762V7</span><span>PAGES 1–5</span></div>
+                <h1>Attention Is All You Need</h1>
+                <div class="my-scholar-translation-demo paper-title-translation" data-translation-block><small>标题译文 · PAGE 1</small><p>注意力机制就是你所需要的一切</p></div>
+                <p class="paper-authors">Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N. Gomez, Łukasz Kaiser, Illia Polosukhin</p>
+                <div class="paper-source-row">
+                  <button class="source-page-button" type="button" data-source-page="1">查看原始第 1 页</button>
+                  <a href="assets/demo/attention/attention-is-all-you-need-pages-1-5.pdf" target="_blank">打开前 5 页 PDF ↗</a>
+                  <a href="https://arxiv.org/pdf/1706.03762" target="_blank" rel="noreferrer">官方完整 PDF ↗</a>
+                </div>
+                <p class="authenticity-note"><strong>内容边界：</strong>下面的英文正文直接取自论文前 5 页，并按章节连续排列；公式和图示保留原始内容。完整排版始终可以回到原页核对。</p>
+                <p class="translation-disclosure"><strong>翻译说明：</strong>点击工具栏“全文翻译”后，中文会像正式客户端一样逐段插入原文下方。为保证静态 Demo 稳定，译文采用预置校对文本，用来展示双语排版和交互；它不是论文官方译文，也不伪装成一次实时模型调用。</p>
+                <div class="source-label"><span>ABSTRACT · SOURCE PAGE 1</span><button class="source-page-button" type="button" data-source-page="1">原页</button></div>
+                <div class="abstract">
+                  <p>The dominant sequence transduction models are based on complex recurrent or convolutional neural networks that include an encoder and a decoder. The best performing models also connect the encoder and decoder through an attention mechanism. We propose a new simple network architecture, the Transformer, based solely on attention mechanisms, dispensing with recurrence and convolutions entirely.</p>
+                  <div class="my-scholar-translation-demo" data-translation-block><small>译文 · PAGE 1</small><p>主流的序列转换模型建立在复杂的循环神经网络或卷积神经网络之上，其中包含编码器和解码器。表现最好的模型还通过注意力机制连接编码器与解码器。我们提出了一种新的简单网络架构——Transformer，它完全基于注意力机制，彻底摒弃了循环与卷积。</p></div>
+                  <p>Experiments on two machine translation tasks show these models to be superior in quality while being more parallelizable and requiring significantly less time to train. Our model achieves 28.4 BLEU on the WMT 2014 English-to-German translation task, improving over the existing best results, including ensembles, by over 2 BLEU.</p>
+                  <div class="my-scholar-translation-demo" data-translation-block><small>译文 · PAGE 1</small><p>在两项机器翻译任务上的实验表明，这些模型不仅质量更高，而且并行化程度更好、训练时间显著更短。我们的模型在 WMT 2014 英德翻译任务上取得了 28.4 BLEU，相比包括集成模型在内的已有最佳结果提升了 2 个以上的 BLEU。</p></div>
+                  <p>On the WMT 2014 English-to-French translation task, our model establishes a new single-model state-of-the-art BLEU score of 41.8 after training for 3.5 days on eight GPUs, a small fraction of the training costs of the best models from the literature. We show that the Transformer generalizes well to other tasks by applying it successfully to English constituency parsing both with large and limited training data.</p>
+                  <div class="my-scholar-translation-demo" data-translation-block><small>译文 · PAGE 1</small><p>在 WMT 2014 英法翻译任务上，我们的模型使用 8 块 GPU 训练 3.5 天后，以 41.8 BLEU 刷新了单模型最佳成绩，训练成本仅为文献中最佳模型的一小部分。我们还将 Transformer 成功应用于大规模和有限训练数据条件下的英语成分句法分析，说明它能够很好地泛化到其他任务。</p></div>
+                </div>
+              </header>
+
+              <section class="reflow-section" id="introduction" data-source-page="2">
+                <div class="source-label"><span>1 · INTRODUCTION · SOURCE PAGE 2</span><button class="source-page-button" type="button" data-source-page="2">原页</button></div>
+                <h2>1 Introduction</h2>
+                <p>Recurrent neural networks, long short-term memory [13] and gated recurrent [7] neural networks in particular, have been firmly established as state of the art approaches in sequence modeling and transduction problems such as language modeling and machine translation [35, 2, 5]. Numerous efforts have since continued to push the boundaries of recurrent language models and encoder-decoder architectures [38, 24, 15].</p>
+                <div class="my-scholar-translation-demo" data-translation-block><small>译文 · PAGE 2</small><p>循环神经网络，尤其是长短期记忆网络 [13] 和门控循环神经网络 [7]，已经牢固确立为语言建模、机器翻译等序列建模与转换问题中的先进方法 [35, 2, 5]。此后，大量工作持续推动循环语言模型和编码器—解码器架构的边界 [38, 24, 15]。</p></div>
+                <p>Recurrent models typically factor computation along the symbol positions of the input and output sequences. Aligning the positions to steps in computation time, they generate a sequence of hidden states h<sub>t</sub>, as a function of the previous hidden state h<sub>t−1</sub> and the input for position t. This inherently sequential nature precludes parallelization within training examples, which becomes critical at longer sequence lengths, as memory constraints limit batching across examples.</p>
+                <div class="my-scholar-translation-demo" data-translation-block><small>译文 · PAGE 2</small><p>循环模型通常沿输入和输出序列中的符号位置分解计算。它们将位置与计算时间步对齐，并根据前一隐藏状态 h<sub>t−1</sub> 以及位置 t 的输入生成隐藏状态序列 h<sub>t</sub>。这种固有的顺序特性使单个训练样本内部无法并行；当序列较长、内存限制又压缩了跨样本批处理规模时，这一问题尤为关键。</p></div>
+                <p>Attention mechanisms have become an integral part of compelling sequence modeling and transduction models in various tasks, allowing modeling of dependencies without regard to their distance in the input or output sequences [2, 19]. In all but a few cases [27], however, such attention mechanisms are used in conjunction with a recurrent network.</p>
+                <div class="my-scholar-translation-demo" data-translation-block><small>译文 · PAGE 2</small><p>注意力机制已经成为多种任务中高性能序列建模与转换模型不可或缺的一部分，使模型能够不受输入或输出序列中距离的限制来刻画依赖关系 [2, 19]。然而，除少数情况外 [27]，这类注意力机制仍与循环网络结合使用。</p></div>
+                <p class="original-highlight">In this work we propose the Transformer, a model architecture eschewing recurrence and instead relying entirely on an attention mechanism to draw global dependencies between input and output. The Transformer allows for significantly more parallelization and can reach a new state of the art in translation quality after being trained for as little as twelve hours on eight P100 GPUs.</p>
+                <div class="my-scholar-translation-demo" data-translation-block><small>译文 · PAGE 2</small><p>在本文中，我们提出了 Transformer：一种摒弃循环结构、完全依赖注意力机制来建立输入与输出之间全局依赖关系的模型架构。Transformer 能够实现显著更高的并行度，并且仅使用 8 块 P100 GPU 训练 12 小时便可达到新的翻译质量最佳水平。</p></div>
+                <div class="clue-action">
+                  <div><small>REAL SOURCE CLUE · PAGE 2</small><strong>Global dependencies without recurrence</strong></div>
+                  <button class="capture-clue" type="button" data-clue-id="global" data-clue-title="Global dependencies without recurrence" data-clue-source="Page 2 · Introduction">收录线索</button>
+                </div>
+              </section>
+
+              <section class="reflow-section" id="background" data-source-page="2">
+                <div class="source-label"><span>2 · BACKGROUND · SOURCE PAGE 2</span><button class="source-page-button" type="button" data-source-page="2">原页</button></div>
+                <h2>2 Background</h2>
+                <p>The goal of reducing sequential computation also forms the foundation of the Extended Neural GPU [16], ByteNet [18] and ConvS2S [9], all of which use convolutional neural networks as basic building block, computing hidden representations in parallel for all input and output positions.</p>
+                <div class="my-scholar-translation-demo" data-translation-block><small>译文 · PAGE 2</small><p>减少顺序计算这一目标也是 Extended Neural GPU [16]、ByteNet [18] 和 ConvS2S [9] 的基础。这些模型都以卷积神经网络为基本构件，并行计算所有输入和输出位置的隐藏表示。</p></div>
+                <p>In these models, the number of operations required to relate signals from two arbitrary input or output positions grows in the distance between positions, linearly for ConvS2S and logarithmically for ByteNet. This makes it more difficult to learn dependencies between distant positions [12]. In the Transformer this is reduced to a constant number of operations, albeit at the cost of reduced effective resolution due to averaging attention-weighted positions, an effect we counteract with Multi-Head Attention as described in section 3.2.</p>
+                <div class="my-scholar-translation-demo" data-translation-block><small>译文 · PAGE 2</small><p>在这些模型中，关联任意两个输入或输出位置的信号所需的操作次数会随位置间距离增加：ConvS2S 呈线性增长，ByteNet 呈对数增长。这使远距离位置之间的依赖关系更难学习 [12]。Transformer 将其降为常数次操作，但由于对注意力加权位置取平均，有效分辨率会有所下降；我们通过第 3.2 节所述的多头注意力来抵消这一影响。</p></div>
+                <p>Self-attention, sometimes called intra-attention is an attention mechanism relating different positions of a single sequence in order to compute a representation of the sequence. Self-attention has been used successfully in a variety of tasks including reading comprehension, abstractive summarization, textual entailment and learning task-independent sentence representations [4, 27, 28, 22].</p>
+                <div class="my-scholar-translation-demo" data-translation-block><small>译文 · PAGE 2</small><p>自注意力有时也称内部注意力，它通过关联单个序列中的不同位置来计算该序列的表示。自注意力已成功应用于阅读理解、抽象式摘要、文本蕴含以及学习与任务无关的句子表示等多种任务 [4, 27, 28, 22]。</p></div>
+                <p>To the best of our knowledge, however, the Transformer is the first transduction model relying entirely on self-attention to compute representations of its input and output without using sequence-aligned RNNs or convolution.</p>
+                <div class="my-scholar-translation-demo" data-translation-block><small>译文 · PAGE 2</small><p>然而，据我们所知，Transformer 是第一个完全依赖自注意力来计算输入和输出表示、而不使用与序列对齐的循环神经网络或卷积的转换模型。</p></div>
+              </section>
+
+              <section class="reflow-section" id="architecture" data-source-page="3">
+                <div class="source-label"><span>3 · MODEL ARCHITECTURE · SOURCE PAGES 2–3</span><button class="source-page-button" type="button" data-source-page="3">原页</button></div>
+                <h2>3 Model Architecture</h2>
+                <p>Most competitive neural sequence transduction models have an encoder-decoder structure [5, 2, 35]. Here, the encoder maps an input sequence of symbol representations (x<sub>1</sub>, ..., x<sub>n</sub>) to a sequence of continuous representations z = (z<sub>1</sub>, ..., z<sub>n</sub>). Given z, the decoder then generates an output sequence (y<sub>1</sub>, ..., y<sub>m</sub>) of symbols one element at a time.</p>
+                <div class="my-scholar-translation-demo" data-translation-block><small>译文 · PAGES 2–3</small><p>大多数具有竞争力的神经序列转换模型都采用编码器—解码器结构 [5, 2, 35]。其中，编码器将符号表示的输入序列 (x<sub>1</sub>, ..., x<sub>n</sub>) 映射为连续表示序列 z = (z<sub>1</sub>, ..., z<sub>n</sub>)。给定 z 后，解码器每次生成一个符号，从而产生输出序列 (y<sub>1</sub>, ..., y<sub>m</sub>)。</p></div>
+                <figure class="source-figure">
+                  <img src="assets/demo/attention/figure-1.png" alt="论文原始 Figure 1：Transformer 模型架构">
+                  <figcaption><strong>Figure 1: The Transformer — model architecture.</strong><button class="source-page-button" type="button" data-source-page="3">核对第 3 页</button></figcaption>
+                  <div class="my-scholar-translation-demo caption-translation" data-translation-block><small>图注译文 · PAGE 3</small><p>图 1：Transformer 模型架构。</p></div>
+                </figure>
+                <div class="clue-action">
+                  <div><small>REAL SOURCE FIGURE · PAGE 3</small><strong>Figure 1 · Encoder and decoder stacks</strong></div>
+                  <button class="capture-clue" type="button" data-clue-id="figure" data-clue-title="Figure 1 · Encoder and decoder stacks" data-clue-source="Page 3 · Model Architecture">收录图示</button>
+                </div>
+                <h3>3.1 Encoder and Decoder Stacks</h3>
+                <p><strong>Encoder:</strong> The encoder is composed of a stack of N = 6 identical layers. Each layer has two sub-layers. The first is a multi-head self-attention mechanism, and the second is a simple, position-wise fully connected feed-forward network. We employ a residual connection [11] around each of the two sub-layers, followed by layer normalization [1].</p>
+                <div class="my-scholar-translation-demo" data-translation-block><small>译文 · PAGE 3</small><p><strong>编码器：</strong>编码器由 N = 6 个相同层堆叠而成。每一层包含两个子层：第一个是多头自注意力机制，第二个是简单的逐位置全连接前馈网络。我们在两个子层周围都采用残差连接 [11]，随后进行层归一化 [1]。</p></div>
+                <p><strong>Decoder:</strong> The decoder is also composed of a stack of N = 6 identical layers. In addition to the two sub-layers in each encoder layer, the decoder inserts a third sub-layer, which performs multi-head attention over the output of the encoder stack. Similar to the encoder, we employ residual connections around each of the sub-layers, followed by layer normalization.</p>
+                <div class="my-scholar-translation-demo" data-translation-block><small>译文 · PAGE 3</small><p><strong>解码器：</strong>解码器同样由 N = 6 个相同层堆叠而成。除编码器每层所含的两个子层外，解码器还插入第三个子层，对编码器堆栈的输出执行多头注意力。与编码器类似，我们在每个子层周围采用残差连接，随后进行层归一化。</p></div>
+              </section>
+
+              <section class="reflow-section" id="attention" data-source-page="4">
+                <div class="source-label"><span>3.2 · ATTENTION · SOURCE PAGES 3–4</span><button class="source-page-button" type="button" data-source-page="4">原页</button></div>
+                <h2>3.2 Attention</h2>
+                <p>An attention function can be described as mapping a query and a set of key-value pairs to an output, where the query, keys, values, and output are all vectors. The output is computed as a weighted sum of the values, where the weight assigned to each value is computed by a compatibility function of the query with the corresponding key.</p>
+                <div class="my-scholar-translation-demo" data-translation-block><small>译文 · PAGES 3–4</small><p>注意力函数可以描述为：将一个查询和一组键—值对映射为一个输出，其中查询、键、值和输出均为向量。输出是对各个值的加权求和，而分配给每个值的权重由查询与相应键之间的相容性函数计算得到。</p></div>
+                <figure class="source-figure">
+                  <img src="assets/demo/attention/figure-2.png" alt="论文原始 Figure 2：Scaled Dot-Product Attention 与 Multi-Head Attention">
+                  <figcaption><strong>Figure 2: Scaled Dot-Product Attention and Multi-Head Attention.</strong><button class="source-page-button" type="button" data-source-page="4">核对第 4 页</button></figcaption>
+                  <div class="my-scholar-translation-demo caption-translation" data-translation-block><small>图注译文 · PAGE 4</small><p>图 2：左侧为缩放点积注意力；右侧的多头注意力由多个并行运行的注意力层构成。</p></div>
+                </figure>
+                <h3>3.2.1 Scaled Dot-Product Attention</h3>
+                <p>We call our particular attention “Scaled Dot-Product Attention” (Figure 2). The input consists of queries and keys of dimension d<sub>k</sub>, and values of dimension d<sub>v</sub>. We compute the dot products of the query with all keys, divide each by √d<sub>k</sub>, and apply a softmax function to obtain the weights on the values.</p>
+                <div class="my-scholar-translation-demo" data-translation-block><small>译文 · PAGE 4</small><p>我们将所采用的注意力称为“缩放点积注意力”（图 2）。输入由维度为 d<sub>k</sub> 的查询和键以及维度为 d<sub>v</sub> 的值组成。我们计算查询与所有键的点积，将每个点积除以 √d<sub>k</sub>，再应用 softmax 函数得到作用于各个值的权重。</p></div>
+                <p>In practice, we compute the attention function on a set of queries simultaneously, packed together into a matrix Q. The keys and values are also packed together into matrices K and V. We compute the matrix of outputs as:</p>
+                <div class="my-scholar-translation-demo" data-translation-block><small>译文 · PAGE 4</small><p>在实践中，我们同时对一组查询计算注意力函数，并将这些查询打包为矩阵 Q。键和值也分别打包为矩阵 K 和 V。输出矩阵按下式计算：</p></div>
+                <div class="formula" role="img" aria-label="Attention of Q K V equals softmax of Q K transpose divided by square root d k, multiplied by V">Attention(Q, K, V) = softmax(QK<sup>T</sup> / √d<sub>k</sub>)V <small>(1)</small></div>
+                <p>While for small values of d<sub>k</sub> the two mechanisms perform similarly, additive attention outperforms dot product attention without scaling for larger values of d<sub>k</sub> [3]. We suspect that for large values of d<sub>k</sub>, the dot products grow large in magnitude, pushing the softmax function into regions where it has extremely small gradients. To counteract this effect, we scale the dot products by 1/√d<sub>k</sub>.</p>
+                <div class="my-scholar-translation-demo" data-translation-block><small>译文 · PAGE 4</small><p>当 d<sub>k</sub> 较小时，两种机制表现相近；但当 d<sub>k</sub> 较大时，加性注意力优于未缩放的点积注意力 [3]。我们推测，d<sub>k</sub> 较大时点积的幅值会增大，使 softmax 进入梯度极小的区域。为抵消这一影响，我们用 1/√d<sub>k</sub> 对点积进行缩放。</p></div>
+                <div class="clue-action">
+                  <div><small>REAL SOURCE EQUATION · PAGE 4</small><strong>Equation 1 · Scaled Dot-Product Attention</strong></div>
+                  <button class="capture-clue" type="button" data-clue-id="equation" data-clue-title="Equation 1 · Scaled Dot-Product Attention" data-clue-source="Page 4 · Section 3.2.1">收录公式</button>
+                </div>
+              </section>
+
+              <section class="reflow-section" id="multi-head" data-source-page="5">
+                <div class="source-label"><span>3.2.2 · MULTI-HEAD ATTENTION · SOURCE PAGES 4–5</span><button class="source-page-button" type="button" data-source-page="5">原页</button></div>
+                <h2>3.2.2 Multi-Head Attention</h2>
+                <p>Instead of performing a single attention function with d<sub>model</sub>-dimensional keys, values and queries, we found it beneficial to linearly project the queries, keys and values h times with different, learned linear projections to d<sub>k</sub>, d<sub>k</sub> and d<sub>v</sub> dimensions, respectively.</p>
+                <div class="my-scholar-translation-demo" data-translation-block><small>译文 · PAGES 4–5</small><p>与其使用维度为 d<sub>model</sub> 的键、值和查询执行一次注意力函数，我们发现，更有效的做法是使用不同的可学习线性投影，将查询、键和值分别投影 h 次，得到维度为 d<sub>k</sub>、d<sub>k</sub> 和 d<sub>v</sub> 的表示。</p></div>
+                <p class="original-highlight">Multi-head attention allows the model to jointly attend to information from different representation subspaces at different positions. With a single attention head, averaging inhibits this.</p>
+                <div class="my-scholar-translation-demo" data-translation-block><small>译文 · PAGE 5</small><p>多头注意力使模型能够同时关注不同位置、不同表示子空间中的信息。若只使用单个注意力头，求平均的过程会抑制这种能力。</p></div>
+                <div class="formula">MultiHead(Q, K, V) = Concat(head<sub>1</sub>, ..., head<sub>h</sub>)W<sup>O</sup></div>
+                <p>In this work we employ h = 8 parallel attention layers, or heads. For each of these we use d<sub>k</sub> = d<sub>v</sub> = d<sub>model</sub>/h = 64. Due to the reduced dimension of each head, the total computational cost is similar to that of single-head attention with full dimensionality.</p>
+                <div class="my-scholar-translation-demo" data-translation-block><small>译文 · PAGE 5</small><p>本文采用 h = 8 个并行注意力层，即 8 个头。每个头使用 d<sub>k</sub> = d<sub>v</sub> = d<sub>model</sub>/h = 64。由于每个头的维度降低，总计算成本与一个使用完整维度的单头注意力相近。</p></div>
+                <div class="clue-action">
+                  <div><small>REAL SOURCE CLUE · PAGE 5</small><strong>Different representation subspaces at different positions</strong></div>
+                  <button class="capture-clue" type="button" data-clue-id="multi" data-clue-title="Different representation subspaces" data-clue-source="Page 5 · Section 3.2.2">收录线索</button>
+                </div>
+              </section>
+
+              <section class="reflow-section" id="applications" data-source-page="5">
+                <div class="source-label"><span>3.2.3 · APPLICATIONS · SOURCE PAGE 5</span><button class="source-page-button" type="button" data-source-page="5">原页</button></div>
+                <h2>3.2.3 Applications of Attention in our Model</h2>
+                <p>The Transformer uses multi-head attention in three different ways:</p>
+                <div class="my-scholar-translation-demo" data-translation-block><small>译文 · PAGE 5</small><p>Transformer 以三种不同方式使用多头注意力：</p></div>
+                <ul class="paper-list">
+                  <li>In “encoder-decoder attention” layers, the queries come from the previous decoder layer, and the memory keys and values come from the output of the encoder. This allows every position in the decoder to attend over all positions in the input sequence.<div class="my-scholar-translation-demo" data-translation-block><small>译文 · PAGE 5</small><p>在“编码器—解码器注意力”层中，查询来自前一个解码器层，记忆中的键和值来自编码器的输出。因此，解码器中的每个位置都可以关注输入序列的所有位置。</p></div></li>
+                  <li>The encoder contains self-attention layers. In a self-attention layer all of the keys, values and queries come from the same place, in this case, the output of the previous layer in the encoder.<div class="my-scholar-translation-demo" data-translation-block><small>译文 · PAGE 5</small><p>编码器包含自注意力层。在自注意力层中，所有键、值和查询都来自同一个位置；此处即编码器前一层的输出。</p></div></li>
+                  <li>Similarly, self-attention layers in the decoder allow each position in the decoder to attend to all positions in the decoder up to and including that position.<div class="my-scholar-translation-demo" data-translation-block><small>译文 · PAGE 5</small><p>类似地，解码器中的自注意力层允许解码器的每个位置关注解码器中截至该位置（包括该位置）的所有位置。</p></div></li>
+                </ul>
+              </section>
+
+              <section class="reflow-section" id="feed-forward" data-source-page="5">
+                <div class="source-label"><span>3.3–3.4 · SOURCE PAGE 5</span><button class="source-page-button" type="button" data-source-page="5">原页</button></div>
+                <h2>3.3 Position-wise Feed-Forward Networks</h2>
+                <p>In addition to attention sub-layers, each of the layers in our encoder and decoder contains a fully connected feed-forward network, which is applied to each position separately and identically. This consists of two linear transformations with a ReLU activation in between.</p>
+                <div class="my-scholar-translation-demo" data-translation-block><small>译文 · PAGE 5</small><p>除了注意力子层之外，编码器和解码器的每一层还包含一个全连接前馈网络，该网络以相同方式分别作用于每个位置。它由两个线性变换构成，中间使用 ReLU 激活。</p></div>
+                <div class="formula">FFN(x) = max(0, xW<sub>1</sub> + b<sub>1</sub>)W<sub>2</sub> + b<sub>2</sub> <small>(2)</small></div>
+                <p>While the linear transformations are the same across different positions, they use different parameters from layer to layer. Another way of describing this is as two convolutions with kernel size 1. The dimensionality of input and output is d<sub>model</sub> = 512, and the inner-layer has dimensionality d<sub>ff</sub> = 2048.</p>
+                <div class="my-scholar-translation-demo" data-translation-block><small>译文 · PAGE 5</small><p>这些线性变换在不同位置上相同，但不同层使用不同参数。也可以把它描述为两个卷积核大小为 1 的卷积。输入和输出维度为 d<sub>model</sub> = 512，内层维度为 d<sub>ff</sub> = 2048。</p></div>
+                <h3>3.4 Embeddings and Softmax</h3>
+                <p>Similarly to other sequence transduction models, we use learned embeddings to convert the input tokens and output tokens to vectors of dimension d<sub>model</sub>. We also use the usual learned linear transformation and softmax function to convert the decoder output to predicted next-token probabilities.</p>
+                <div class="my-scholar-translation-demo" data-translation-block><small>译文 · PAGE 5</small><p>与其他序列转换模型类似，我们使用学习得到的嵌入，将输入词元和输出词元转换为维度为 d<sub>model</sub> 的向量。我们还使用常规的学习线性变换和 softmax 函数，将解码器输出转换为下一个词元的预测概率。</p></div>
+              </section>
+
+              <p class="paper-boundary">Source: Vaswani et al., “Attention Is All You Need,” arXiv:1706.03762v7. The full first five pages are available through every “原页” control and the excerpt PDF. The reflow view preserves source wording while omitting page furniture such as repeated running elements; the original PDF remains the visual source of truth.</p>
+            </article>
+          </main>
+
+          <aside class="knowledge-panel" aria-label="个人知识库线索面板">
+            <div class="knowledge-panel-inner">
+              <span class="knowledge-kicker">PERSONAL KNOWLEDGE BASE</span>
+              <h3>文章线索</h3>
+              <p class="knowledge-lede">不是脱离上下文的卡片：每条线索保留真实页码、章节和内容类型。</p>
+              <div class="mini-graph" id="mini-graph" aria-label="当前论文与已收录真实线索的关系图">
+                <span class="graph-line line-one"></span>
+                <span class="graph-line line-two"></span>
+                <span class="graph-line line-three"></span>
+                <span class="graph-line line-four"></span>
+                <span class="graph-node main">Attention<br>2017</span>
+                <span class="graph-node global">Global<br>dependencies</span>
+                <span class="graph-node figure">Figure 1<br>Architecture</span>
+                <span class="graph-node equation">Equation 1<br>Attention</span>
+                <span class="graph-node multi">Multi-head<br>subspaces</span>
+              </div>
+              <div class="clue-list-title"><span>已收录线索</span><span id="clue-list-count">0 / 4</span></div>
+              <div class="captured-clues" id="captured-clues">
+                <div class="captured-placeholder" id="captured-placeholder">从正文的真实段落、图示或公式收录第一条线索。</div>
+              </div>
+              <p class="knowledge-truth">演示数据只存在于当前页面，不会写入你的本地文献库。关系节点只对应本页已经展示的真实论文内容。</p>
+            </div>
+          </aside>
+        </div>
+      </div>
+    </section>
+
+    <section class="comparison" id="difference" aria-label="两种阅读工作流的具体差异">
+      <article class="compare-column">
+        <span class="compare-label">ZOTERO WORKFLOW SHOWN ABOVE</span>
+        <h2>围绕 PDF 选区阅读、翻译与批注</h2>
+        <div class="compare-row"><strong>阅读对象</strong><span>保留论文原始页面，在页内选择、高亮和记录。</span></div>
+        <div class="compare-row"><strong>翻译方式</strong><span>选中 PDF 内容后，在 Translate for Zotero 侧栏查看源文本与结果。</span></div>
+        <div class="compare-row"><strong>回到出处</strong><span>批注天然指向 PDF 页与选区。</span></div>
+        <div class="compare-row"><strong>整理重心</strong><span>文献条目、集合、标签、笔记与附件。</span></div>
+      </article>
+      <article class="compare-column">
+        <span class="compare-label">GUZI SCHOLAR WORKFLOW SHOWN ABOVE</span>
+        <h2>在原页证据之上增加连续双语阅读与线索关系</h2>
+        <div class="compare-row"><strong>阅读对象</strong><span>同一 PDF 被组织为连续的标题、正文、图表和公式。</span></div>
+        <div class="compare-row"><strong>翻译方式</strong><span>点击“全文翻译”，中文逐段插入原文下方，公式与来源页码保持可见。</span></div>
+        <div class="compare-row"><strong>回到出处</strong><span>每个内容单元与线索都保留原始页码，可随时核对。</span></div>
+        <div class="compare-row"><strong>整理重心</strong><span>把阅读中留下的真实线索继续连接到个人知识关系中。</span></div>
+      </article>
+      <p class="fairness-note">这不是“Zotero 能做什么 / 不能做什么”的完整功能评测。Zotero 的翻译效果来自第三方插件工作流，具体服务与质量取决于用户配置；本 Demo 对比的是选区侧栏翻译与谷子学术整篇连续双语阅读的交互重心。</p>
+    </section>
+
+    <section class="closing">
+      <div><small>KEEP THE SOURCE · CONNECT THE CLUES</small><h2>不是离开论文做总结，而是在论文原页之上建立自己的研究脉络。</h2></div>
+      <a class="primary-action" href="../../webseit/landing.html#beta" data-server-href="/#beta">返回谷子学术内测页</a>
+    </section>
+  </main>
+
+  <dialog class="source-dialog" id="source-dialog" aria-labelledby="dialog-title">
+    <div class="dialog-head"><strong id="dialog-title">论文原始页面</strong><span id="dialog-page-label">Page 1 / 5</span><button class="dialog-close" type="button" id="dialog-close" aria-label="关闭原始页面">×</button></div>
+    <div class="dialog-body"><img id="dialog-image" src="assets/demo/attention/page-01.png" alt="Attention Is All You Need 原始 PDF 第 1 页"></div>
+  </dialog>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <script>
+    (function () {
+      if (window.location.protocol !== "file:") {
+        document.querySelectorAll("[data-server-href]").forEach(function (element) {
+          element.setAttribute("href", element.dataset.serverHref);
+        });
+      }
+
+      var zScroll = document.getElementById("z-page-scroll");
+      var zPages = Array.from(document.querySelectorAll(".z-page"));
+      var zThumbs = Array.from(document.querySelectorAll(".z-thumb"));
+      var zNotes = Array.from(document.querySelectorAll(".z-note"));
+      var zPanelTabs = Array.from(document.querySelectorAll(".z-note-tabs [data-z-panel]"));
+      var zTranslationData = {
+        global: {
+          page: "Page 2 · Introduction",
+          source: "In this work we propose the Transformer, a model architecture eschewing recurrence and instead relying entirely on an attention mechanism to draw global dependencies between input and output.",
+          result: "在本文中，我们提出了 Transformer：一种摒弃循环结构、完全依赖注意力机制来建立输入与输出之间全局依赖关系的模型架构。"
+        },
+        equation: {
+          page: "Page 4 · Section 3.2.1",
+          source: "We call our particular attention ‘Scaled Dot-Product Attention’. We compute the dot products of the query with all keys, divide each by √dₖ, and apply a softmax function to obtain the weights on the values.",
+          result: "我们将所采用的注意力称为“缩放点积注意力”。我们计算查询与所有键的点积，将每个点积除以 √dₖ，再应用 softmax 函数得到作用于各个值的权重。"
+        },
+        multi: {
+          page: "Page 5 · Section 3.2.2",
+          source: "Multi-head attention allows the model to jointly attend to information from different representation subspaces at different positions. With a single attention head, averaging inhibits this.",
+          result: "多头注意力使模型能够同时关注不同位置、不同表示子空间中的信息。若只使用单个注意力头，求平均的过程会抑制这种能力。"
+        }
+      };
+
+      function showZPanel(name) {
+        zPanelTabs.forEach(function (tab) {
+          var active = tab.dataset.zPanel === name;
+          tab.classList.toggle("is-active", active);
+          tab.setAttribute("aria-selected", String(active));
+        });
+        document.querySelectorAll("[data-z-panel-content]").forEach(function (panel) {
+          panel.hidden = panel.dataset.zPanelContent !== name;
+        });
+      }
+
+      function setZTranslation(key) {
+        var record = zTranslationData[key];
+        if (!record) return;
+        document.getElementById("z-translation-page").textContent = record.page;
+        document.getElementById("z-source-text").textContent = record.source;
+        document.getElementById("z-result-text").textContent = record.result;
+        zNotes.forEach(function (item) { item.classList.toggle("is-current", item.dataset.noteId === key); });
+        showZPanel("translate");
+      }
+
+      zPanelTabs.forEach(function (tab) {
+        tab.addEventListener("click", function () { showZPanel(tab.dataset.zPanel); });
+      });
+
+      function setZPage(pageNumber) {
+        zThumbs.forEach(function (thumb) {
+          thumb.classList.toggle("is-active", thumb.dataset.zPage === String(pageNumber));
+        });
+      }
+
+      zThumbs.forEach(function (thumb) {
+        thumb.addEventListener("click", function () {
+          var page = document.getElementById("z-page-" + thumb.dataset.zPage);
+          if (page) page.scrollIntoView({ behavior: "smooth", block: "start" });
+        });
+      });
+
+      zNotes.forEach(function (note) {
+        note.addEventListener("click", function () {
+          var page = document.getElementById("z-page-" + note.dataset.zTarget);
+          setZTranslation(note.dataset.noteId);
+          if (page) page.scrollIntoView({ behavior: "smooth", block: "center" });
+        });
+      });
+
+      document.querySelectorAll("[data-z-note]").forEach(function (highlight) {
+        highlight.addEventListener("click", function () {
+          setZTranslation(highlight.dataset.zNote);
+        });
+      });
+
+      document.querySelectorAll("[data-copy-z]").forEach(function (button) {
+        button.addEventListener("click", function () {
+          var source = document.getElementById("z-source-text").textContent;
+          var result = document.getElementById("z-result-text").textContent;
+          var value = button.dataset.copyZ === "source" ? source : (button.dataset.copyZ === "result" ? result : source + "\n\n" + result);
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(value).then(function () { showToast("已复制 Zotero 翻译面板内容。"); }).catch(function () { showToast("当前页面环境不允许写入剪贴板。"); });
+          } else {
+            showToast("当前页面环境不允许写入剪贴板。");
+          }
+        });
+      });
+
+      if ("IntersectionObserver" in window && zScroll) {
+        var zObserver = new IntersectionObserver(function (entries) {
+          var visible = entries.filter(function (entry) { return entry.isIntersecting; }).sort(function (a, b) {
+            return b.intersectionRatio - a.intersectionRatio;
+          });
+          if (visible[0]) setZPage(visible[0].target.dataset.page);
+        }, { root: zScroll, threshold: [0.2, 0.45, 0.7] });
+        zPages.forEach(function (page) { zObserver.observe(page); });
+      }
+
+      var assistantTabs = Array.from(document.querySelectorAll(".assistant-tab"));
+      assistantTabs.forEach(function (tab) {
+        tab.addEventListener("click", function () {
+          assistantTabs.forEach(function (item) {
+            var active = item === tab;
+            item.classList.toggle("is-active", active);
+            item.setAttribute("aria-selected", String(active));
+          });
+          document.querySelectorAll("[data-assistant-content]").forEach(function (panel) {
+            panel.hidden = panel.dataset.assistantContent !== tab.dataset.assistantPanel;
+          });
+        });
+      });
+
+      var scholarReader = document.getElementById("scholar-reader");
+      var outlineLinks = Array.from(document.querySelectorAll(".outline-link"));
+      var readerSections = outlineLinks.map(function (link) {
+        return document.getElementById(link.dataset.readerTarget);
+      }).filter(Boolean);
+
+      outlineLinks.forEach(function (link) {
+        link.addEventListener("click", function () {
+          var target = document.getElementById(link.dataset.readerTarget);
+          if (target) target.scrollIntoView({ behavior: "smooth", block: "start" });
+        });
+      });
+
+      if ("IntersectionObserver" in window && scholarReader) {
+        var readerObserver = new IntersectionObserver(function (entries) {
+          var visible = entries.filter(function (entry) { return entry.isIntersecting; }).sort(function (a, b) {
+            return b.intersectionRatio - a.intersectionRatio;
+          });
+          if (!visible[0]) return;
+          outlineLinks.forEach(function (link) {
+            link.classList.toggle("is-current", link.dataset.readerTarget === visible[0].target.id);
+          });
+        }, { root: scholarReader, threshold: [0.12, 0.36, 0.62] });
+        readerSections.forEach(function (section) { readerObserver.observe(section); });
+      }
+
+      var scholarWindow = document.getElementById("scholar-window");
+      var focusToggle = document.getElementById("focus-toggle");
+      focusToggle.addEventListener("click", function () {
+        var active = scholarWindow.classList.toggle("focus-mode");
+        focusToggle.setAttribute("aria-pressed", String(active));
+        focusToggle.textContent = active ? "退出专注" : "专注阅读";
+      });
+
+      var paper = document.querySelector(".scholar-paper");
+      var paperSize = 17;
+      document.getElementById("font-down").addEventListener("click", function () {
+        paperSize = Math.max(14, paperSize - 1);
+        paper.style.fontSize = paperSize + "px";
+      });
+      document.getElementById("font-up").addEventListener("click", function () {
+        paperSize = Math.min(22, paperSize + 1);
+        paper.style.fontSize = paperSize + "px";
+      });
+
+      var fullTranslateButton = document.getElementById("full-translate-demo");
+      var translationProgress = document.getElementById("translation-progress-demo");
+      var translationProgressLabel = document.getElementById("translation-progress-label");
+      var translationProgressCount = document.getElementById("translation-progress-count");
+      var translationProgressBar = document.getElementById("translation-progress-bar");
+      var translationProgressTrack = translationProgress.querySelector('[role="progressbar"]');
+      var translationBlocks = Array.from(document.querySelectorAll("[data-translation-block]"));
+
+      fullTranslateButton.addEventListener("click", function () {
+        if (scholarWindow.classList.contains("translations-visible")) {
+          scholarWindow.classList.remove("translations-visible");
+          fullTranslateButton.setAttribute("aria-pressed", "false");
+          fullTranslateButton.textContent = "文 · 全文翻译";
+          showToast("已隐藏译文，原文和来源页码保持不变。");
+          return;
+        }
+
+        var total = translationBlocks.length;
+        var done = 0;
+        var step = Math.max(1, Math.ceil(total / 14));
+        fullTranslateButton.disabled = true;
+        translationProgress.hidden = false;
+        translationProgressLabel.textContent = "正在翻译全文";
+        translationProgressCount.textContent = "0 / " + total + " 段";
+        translationProgressBar.style.width = "0%";
+        translationProgressTrack.setAttribute("aria-valuenow", "0");
+
+        var timer = window.setInterval(function () {
+          done = Math.min(total, done + step);
+          var percent = total ? Math.round(done / total * 100) : 100;
+          translationProgressCount.textContent = done + " / " + total + " 段";
+          translationProgressBar.style.width = percent + "%";
+          translationProgressTrack.setAttribute("aria-valuenow", String(percent));
+          if (done < total) return;
+
+          window.clearInterval(timer);
+          translationProgressLabel.textContent = "全文翻译完成";
+          scholarWindow.classList.add("translations-visible");
+          fullTranslateButton.disabled = false;
+          fullTranslateButton.setAttribute("aria-pressed", "true");
+          fullTranslateButton.textContent = "隐藏全文译文";
+          window.setTimeout(function () { translationProgress.hidden = true; }, 650);
+          showToast("全文翻译完成，" + total + " 段译文已插入原文下方。");
+        }, 72);
+      });
+
+      var sourceDialog = document.getElementById("source-dialog");
+      var dialogImage = document.getElementById("dialog-image");
+      var dialogPageLabel = document.getElementById("dialog-page-label");
+
+      function openSourcePage(pageNumber) {
+        var page = Math.min(5, Math.max(1, Number(pageNumber) || 1));
+        dialogImage.src = "assets/demo/attention/page-0" + page + ".png";
+        dialogImage.alt = "Attention Is All You Need 原始 PDF 第 " + page + " 页";
+        dialogPageLabel.textContent = "Page " + page + " / 5";
+        if (typeof sourceDialog.showModal === "function") {
+          sourceDialog.showModal();
+          document.body.classList.add("is-modal-open");
+        } else {
+          window.open(dialogImage.src, "_blank");
+        }
+      }
+
+      document.querySelectorAll("[data-source-page]").forEach(function (button) {
+        if (button.tagName === "BUTTON") {
+          button.addEventListener("click", function () { openSourcePage(button.dataset.sourcePage); });
+        }
+      });
+      document.getElementById("dialog-close").addEventListener("click", function () { sourceDialog.close(); });
+      sourceDialog.addEventListener("click", function (event) {
+        if (event.target === sourceDialog) sourceDialog.close();
+      });
+      sourceDialog.addEventListener("close", function () { document.body.classList.remove("is-modal-open"); });
+
+      var captured = new Map();
+      var capturedClues = document.getElementById("captured-clues");
+      var capturedPlaceholder = document.getElementById("captured-placeholder");
+      var clueCount = document.getElementById("clue-count");
+      var clueListCount = document.getElementById("clue-list-count");
+      var miniGraph = document.getElementById("mini-graph");
+      var toast = document.getElementById("toast");
+      var toastTimer = 0;
+
+      function showToast(message) {
+        toast.textContent = message;
+        toast.classList.add("is-visible");
+        window.clearTimeout(toastTimer);
+        toastTimer = window.setTimeout(function () { toast.classList.remove("is-visible"); }, 2200);
+      }
+
+      document.querySelectorAll(".capture-clue").forEach(function (button) {
+        button.addEventListener("click", function () {
+          var clueId = button.dataset.clueId;
+          if (captured.has(clueId)) {
+            showToast("这条线索已经收录，并保留了原始页码。");
+            return;
+          }
+          captured.set(clueId, {
+            title: button.dataset.clueTitle,
+            source: button.dataset.clueSource
+          });
+          if (capturedPlaceholder) capturedPlaceholder.remove();
+          var card = document.createElement("article");
+          card.className = "captured-card";
+          var kicker = document.createElement("small");
+          kicker.textContent = "SOURCE-ANCHORED CLUE";
+          var title = document.createElement("strong");
+          title.textContent = button.dataset.clueTitle;
+          var source = document.createElement("span");
+          source.textContent = button.dataset.clueSource;
+          card.append(kicker, title, source);
+          capturedClues.prepend(card);
+          miniGraph.classList.add("has-" + clueId);
+          button.classList.add("is-saved");
+          button.textContent = "已收录";
+          clueCount.textContent = String(captured.size);
+          clueListCount.textContent = captured.size + " / 4";
+          showToast("已收录真实线索：" + button.dataset.clueTitle);
+        });
+      });
+    }());
+  </script>
+</body>
+</html>

@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">谷子学术</string>
+    <string name="title_activity_main">谷子学术</string>
+    <string name="package_name">com.guzi.scholar</string>
+    <string name="custom_url_scheme">com.guzi.scholar</string>
+</resources>

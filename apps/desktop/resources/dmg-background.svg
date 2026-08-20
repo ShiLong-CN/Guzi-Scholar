@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="530" viewBox="0 0 720 530">
+  <defs>
+    <linearGradient id="page" x1="0" y1="0" x2="720" y2="530" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFFCF7"/>
+      <stop offset="1" stop-color="#F6F0E7"/>
+    </linearGradient>
+    <linearGradient id="arrow" x1="258" y1="0" x2="462" y2="0" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#F59E0B"/>
+      <stop offset="1" stop-color="#C45B0B"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="160%">
+      <feDropShadow dx="0" dy="10" stdDeviation="18" flood-color="#5B3A1B" flood-opacity="0.12"/>
+    </filter>
+  </defs>
+  <rect width="720" height="530" fill="url(#page)"/>
+  <circle cx="74" cy="-18" r="160" fill="#F59E0B" opacity="0.05"/>
+  <circle cx="690" cy="230" r="210" fill="#C45B0B" opacity="0.035"/>
+
+  <g transform="translate(42 32)">
+    <path d="M3 5.5C8.8 3 14 3.8 19 8.2V28c-4.8-4.2-10-5-16-2.6V5.5Z" fill="#FFF7ED" stroke="#D65B0A" stroke-width="2" stroke-linejoin="round"/>
+    <path d="M35 5.5C29.2 3 24 3.8 19 8.2V28c4.8-4.2 10-5 16-2.6V5.5Z" fill="#FFF7ED" stroke="#D65B0A" stroke-width="2" stroke-linejoin="round"/>
+    <path d="m11.5 13.5 5 3-5 3V24l9-5.4v-4.2l-9-5.4v4.5Z" fill="#F97316"/>
+  </g>
+  <text x="91" y="48" fill="#2F2924" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', sans-serif" font-size="18" font-weight="700">安装谷子学术</text>
+  <text x="91" y="69" fill="#756A60" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', sans-serif" font-size="11.5">开源预览版 · 版本 0.1.0 · Apple 芯片</text>
+
+  <g opacity="0.9">
+    <circle cx="168" cy="203" r="66" fill="#FFFFFF" stroke="#E9DED1"/>
+    <circle cx="552" cy="203" r="66" fill="#FFFFFF" stroke="#E9DED1"/>
+  </g>
+  <text x="360" y="146" text-anchor="middle" fill="#786B5E" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', sans-serif" font-size="12" font-weight="600">将左侧“谷子学术”拖入右侧“应用程序”</text>
+  <path d="M258 202H454" stroke="url(#arrow)" stroke-width="4" stroke-linecap="round"/>
+  <path d="m445 190 17 12-17 12" fill="none" stroke="#C45B0B" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="360" cy="202" r="7" fill="#FFF8EE" stroke="#E47A13" stroke-width="2"/>
+
+  <g filter="url(#shadow)">
+    <rect x="40" y="315" width="640" height="145" rx="18" fill="#FFFFFF" fill-opacity="0.91" stroke="#E8DED3"/>
+  </g>
+  <text x="64" y="344" fill="#332B24" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', sans-serif" font-size="14" font-weight="700">首次打开被系统拦截？</text>
+  <text x="64" y="363" fill="#7A6C60" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', sans-serif" font-size="10.5">请先完成上方拖拽安装，再按系统提供的单个 App 安全例外流程操作。</text>
+
+  <g font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', sans-serif">
+    <circle cx="73" cy="390" r="10" fill="#FFF1D7" stroke="#E68A20"/>
+    <text x="73" y="394" text-anchor="middle" fill="#A64B08" font-size="10" font-weight="700">1</text>
+    <text x="92" y="394" fill="#4D433A" font-size="11.5" font-weight="600">从“应用程序”打开“谷子学术”</text>
+
+    <circle cx="73" cy="418" r="10" fill="#FFF1D7" stroke="#E68A20"/>
+    <text x="73" y="422" text-anchor="middle" fill="#A64B08" font-size="10" font-weight="700">2</text>
+    <text x="92" y="422" fill="#4D433A" font-size="11.5" font-weight="600">前往“系统设置” › “隐私与安全性”</text>
+
+    <circle cx="397" cy="390" r="10" fill="#FFF1D7" stroke="#E68A20"/>
+    <text x="397" y="394" text-anchor="middle" fill="#A64B08" font-size="10" font-weight="700">3</text>
+    <text x="416" y="394" fill="#4D433A" font-size="11.5" font-weight="600">在“安全性”中选择“仍要打开”</text>
+    <text x="416" y="417" fill="#7A6C60" font-size="10.5">再次确认“打开”，以后即可正常启动</text>
+  </g>
+
+  <text x="360" y="484" text-anchor="middle" fill="#8A7C70" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', sans-serif" font-size="9.5">仅安装来自谷子实验室官方渠道的内测包 · 不需要关闭 Gatekeeper</text>
+</svg>
