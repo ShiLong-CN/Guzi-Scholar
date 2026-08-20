@@ -5,8 +5,8 @@
   "channel": "stable",
   "version": "0.1.0",
   "download_url": "https://github.com/ShiLong-CN/guzi-scholar/releases/download/v0.1.0/Guzi-Scholar-0.1.0-arm64-internal.dmg",
-  "sha256": "8ee9d61c22de5250668669955a6d9404db2e663b2a746b681e067dd3756bb898",
+  "sha256": "19bbe395075f463a200ef0f46d4a6c9d32a46ec54bcd6d79dda3f585c7bee2e2",
   "notes": "Guzi Scholar 0.1.0 open-source preview",
-  "published_at": "2026-08-20T03:08:37Z",
+  "published_at": "2026-08-20T03:18:30Z",
   "minimum_system_version": "12.0"
 }
