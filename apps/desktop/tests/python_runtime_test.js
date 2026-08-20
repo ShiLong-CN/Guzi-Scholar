@@ -15,6 +15,17 @@ assert.equal(versionSupported({ major: 3, minor: 9 }), true);
 assert.equal(versionSupported({ major: 3, minor: 8 }), false);
 
 {
+  let probeScript = '';
+  const result = probePython(
+    { command: 'python3', args: [], source: 'test' },
+    { spawnSyncImpl: (_command, args) => { probeScript = args.at(-1); return { status: 1, stdout: '', stderr: 'missing scrypt' }; } },
+  );
+  assert.match(probeScript, /hashlib[\s\S]*scrypt/u);
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /missing scrypt/u);
+}
+
+{
   const candidates = pythonCandidates({
     env: {},
     platform: 'darwin',

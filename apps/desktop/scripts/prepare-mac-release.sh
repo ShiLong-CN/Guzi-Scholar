@@ -6,21 +6,45 @@ PROJECT_DIR="${SCRIPT_DIR:h}"
 BUILD_DIR="${PROJECT_DIR}/build"
 RUNTIME_DIR="${BUILD_DIR}/mac-runtime"
 PYINSTALLER_ENV="${BUILD_DIR}/pyinstaller-env"
-BUILD_PYTHON="${MY_SCHOLAR_BUILD_PYTHON:-/opt/anaconda3/bin/python3}"
+BUILD_PYTHON="${MY_SCHOLAR_BUILD_PYTHON:-}"
+if [[ -z "${BUILD_PYTHON}" ]]; then
+  for candidate in "${commands[python3]-}" /opt/anaconda3/bin/python3 /opt/homebrew/bin/python3 /usr/local/bin/python3 /usr/bin/python3; do
+    if [[ -n "${candidate}" && -x "${candidate}" ]] && "${candidate}" -c 'import certifi, hashlib; assert hasattr(hashlib, "scrypt")' >/dev/null 2>&1; then
+      BUILD_PYTHON="${candidate}"
+      break
+    fi
+  done
+fi
 ODL_JAR="${MY_SCHOLAR_ODL_JAR:-}"
 if [[ -z "${ODL_JAR}" ]]; then
   ODL_JAR="$(zsh "${SCRIPT_DIR}/fetch-opendataloader.sh")"
 fi
 EXPECTED_ODL_SHA256="${MY_SCHOLAR_ODL_SHA256:-104a5523c812ba3a43a3c7dd6156e33f23d0e32f03ef1ac629009ef96d7a79e1}"
-JAVA_HOME_PATH="${MY_SCHOLAR_JAVA_HOME:-$(/usr/libexec/java_home)}"
+JAVA_HOME_PATH="${MY_SCHOLAR_JAVA_HOME:-}"
+if [[ -z "${JAVA_HOME_PATH}" ]]; then
+  JAVA_HOME_PATH="$(/usr/libexec/java_home 2>/dev/null || true)"
+fi
 CA_BUNDLE_NAME="ca-certificates.crt"
+PYINSTALLER_PACKAGES=(
+  'altgraph==0.17.5'
+  'macholib==1.16.4'
+  'packaging==26.3'
+  'pyinstaller-hooks-contrib==2026.6'
+  'setuptools==83.0.0'
+  'pyinstaller==6.16.0'
+)
 
 if [[ "$(uname -s)" != "Darwin" || "$(uname -m)" != "arm64" ]]; then
   print -u2 "首版构建仅支持 Apple Silicon macOS。"
   exit 1
 fi
 if [[ ! -x "${BUILD_PYTHON}" ]]; then
-  print -u2 "找不到用于构建独立服务的 Python：${BUILD_PYTHON}"
+  print -u2 "找不到用于构建独立服务的 Python；请安装 arm64 Python 或设置 MY_SCHOLAR_BUILD_PYTHON。"
+  exit 1
+fi
+BUILD_PYTHON_ID="$("${BUILD_PYTHON}" -c 'import platform,sys; print(f"{sys.version_info.major}.{sys.version_info.minor}-{platform.machine()}")')"
+if [[ "${BUILD_PYTHON_ID}" != *-arm64 ]]; then
+  print -u2 "构建 Python 必须是 arm64：${BUILD_PYTHON_ID}"
   exit 1
 fi
 if ! CERTIFI_CA="$("${BUILD_PYTHON}" -c 'import certifi; print(certifi.where())' 2>/dev/null)" || [[ ! -s "${CERTIFI_CA}" ]]; then
@@ -37,22 +61,50 @@ if [[ "${ACTUAL_ODL_SHA256}" != "${EXPECTED_ODL_SHA256}" ]]; then
   exit 1
 fi
 if [[ ! -x "${JAVA_HOME_PATH}/bin/jlink" ]]; then
-  print -u2 "找不到可用的 arm64 JDK：${JAVA_HOME_PATH}"
+  print -u2 "找不到可用的 arm64 JDK；请安装 JDK 或设置 MY_SCHOLAR_JAVA_HOME。"
   exit 1
+fi
+JAVA_BUILD_ARCH="$("${JAVA_HOME_PATH}/bin/java" -XshowSettings:properties -version 2>&1 | awk -F'= ' '/os.arch =/ {print $2; exit}')"
+if [[ "${JAVA_BUILD_ARCH}" != "aarch64" ]]; then
+  print -u2 "构建 JDK 必须是 arm64：${JAVA_BUILD_ARCH}"
+  exit 1
+fi
+if [[ "${MY_SCHOLAR_RELEASE_BUILD:-0}" == "1" ]]; then
+  if [[ "${BUILD_PYTHON_ID}" != 3.11-arm64 ]]; then
+    print -u2 "正式发布固定使用 arm64 Python 3.11，当前为 ${BUILD_PYTHON_ID}。"
+    exit 1
+  fi
+  JAVA_BUILD_MAJOR="$("${JAVA_HOME_PATH}/bin/java" -XshowSettings:properties -version 2>&1 | awk -F'= ' '/java.specification.version =/ {print $2; exit}')"
+  if [[ "${JAVA_BUILD_MAJOR}" != "21" ]]; then
+    print -u2 "正式发布固定使用 JDK 21，当前为 ${JAVA_BUILD_MAJOR}。"
+    exit 1
+  fi
 fi
 
 mkdir -p "${BUILD_DIR}" "${RUNTIME_DIR}"
+if [[ -x "${PYINSTALLER_ENV}/bin/python3" ]]; then
+  ENV_PYTHON_ID="$("${PYINSTALLER_ENV}/bin/python3" -c 'import platform,sys; print(f"{sys.version_info.major}.{sys.version_info.minor}-{platform.machine()}")' 2>/dev/null || true)"
+  if [[ "${ENV_PYTHON_ID}" != "${BUILD_PYTHON_ID}" ]]; then
+    rm -rf "${PYINSTALLER_ENV}"
+  fi
+fi
 if [[ ! -x "${PYINSTALLER_ENV}/bin/python3" ]]; then
   "${BUILD_PYTHON}" -m venv "${PYINSTALLER_ENV}"
 fi
-if ! "${PYINSTALLER_ENV}/bin/python3" -c 'import PyInstaller' >/dev/null 2>&1; then
+if ! "${PYINSTALLER_ENV}/bin/python3" -c '
+import importlib.metadata as metadata
+expected = {
+    "altgraph": "0.17.5",
+    "macholib": "1.16.4",
+    "packaging": "26.3",
+    "pyinstaller-hooks-contrib": "2026.6",
+    "setuptools": "83.0.0",
+    "pyinstaller": "6.16.0",
+}
+raise SystemExit(0 if all(metadata.version(name) == version for name, version in expected.items()) else 1)
+' >/dev/null 2>&1; then
   "${PYINSTALLER_ENV}/bin/python3" -m pip install --disable-pip-version-check \
-    'altgraph==0.17.5' \
-    'macholib==1.16.4' \
-    'packaging==26.3' \
-    'pyinstaller-hooks-contrib==2026.6' \
-    'setuptools==83.0.0' \
-    'pyinstaller==6.16.0'
+    "${PYINSTALLER_PACKAGES[@]}"
 fi
 
 "${PYINSTALLER_ENV}/bin/python3" -m PyInstaller \
@@ -63,26 +115,32 @@ fi
   --distpath "${RUNTIME_DIR}" \
   --workpath "${BUILD_DIR}/pyinstaller-work" \
   --specpath "${BUILD_DIR}" \
+  --exclude-module fitz \
+  --exclude-module pymupdf \
   "${PROJECT_DIR}/server.py"
 
 cp "${CERTIFI_CA}" "${RUNTIME_DIR}/my-scholar-server/${CA_BUNDLE_NAME}"
 cp "${ODL_JAR}" "${RUNTIME_DIR}/opendataloader-pdf-cli-0.0.0.jar"
 mkdir -p "${RUNTIME_DIR}/pdf-renderer"
 "${JAVA_HOME_PATH}/bin/javac" \
+  --release 11 \
   -cp "${ODL_JAR}" \
   -d "${RUNTIME_DIR}/pdf-renderer" \
   "${SCRIPT_DIR}/MyScholarPdfRenderer.java"
-if [[ ! -x "${RUNTIME_DIR}/java/bin/java" ]]; then
-  "${JAVA_HOME_PATH}/bin/jlink" \
-    --add-modules java.base,java.compiler,java.desktop,java.management,java.sql \
-    --strip-debug \
-    --no-header-files \
-    --no-man-pages \
-    --compress=zip-6 \
-    --output "${RUNTIME_DIR}/java"
-fi
+rm -rf "${RUNTIME_DIR}/java.next"
+"${JAVA_HOME_PATH}/bin/jlink" \
+  --add-modules java.base,java.compiler,java.desktop,java.management,java.sql \
+  --strip-debug \
+  --no-header-files \
+  --no-man-pages \
+  --compress=zip-6 \
+  --output "${RUNTIME_DIR}/java.next"
+rm -rf "${RUNTIME_DIR}/java"
+mv "${RUNTIME_DIR}/java.next" "${RUNTIME_DIR}/java"
 
 "${RUNTIME_DIR}/my-scholar-server/my-scholar-server" --help >/dev/null
+SSL_CERT_FILE="${RUNTIME_DIR}/my-scholar-server/${CA_BUNDLE_NAME}" \
+  "${RUNTIME_DIR}/my-scholar-server/my-scholar-server" --dependency-smoke >/dev/null
 "${RUNTIME_DIR}/java/bin/java" -version >/dev/null 2>&1
 test -s "${RUNTIME_DIR}/my-scholar-server/${CA_BUNDLE_NAME}"
 test -f "${RUNTIME_DIR}/pdf-renderer/MyScholarPdfRenderer.class"

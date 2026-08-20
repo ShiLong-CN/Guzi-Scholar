@@ -3,7 +3,8 @@ const path = require('path');
 
 const MINIMUM_PYTHON = Object.freeze({ major: 3, minor: 9 });
 const PROBE_SCRIPT = [
-  'import json, ssl, sqlite3, sys, urllib.request',
+  'import hashlib, json, ssl, sqlite3, sys, urllib.request',
+  'assert hasattr(hashlib, "scrypt")',
   'print(json.dumps({"major": sys.version_info[0], "minor": sys.version_info[1], "micro": sys.version_info[2]}))',
 ].join('; ');
 
@@ -106,7 +107,7 @@ function resolvePythonRuntime(options = {}) {
   const configured = String((options.env || process.env).MY_SCHOLAR_PYTHON || '').trim();
   const hint = configured
     ? `MY_SCHOLAR_PYTHON 指向的解释器不可用：${configured}`
-    : '未找到具备 ssl、sqlite3 和网络标准库的 Python 3.9 或更高版本。';
+    : '未找到具备 hashlib.scrypt、ssl、sqlite3 和网络标准库的 Python 3.9 或更高版本。';
   throw new PythonRuntimeError(hint, attempts);
 }
 

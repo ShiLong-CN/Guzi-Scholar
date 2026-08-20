@@ -502,6 +502,7 @@ def _process_pdf_odl(pdf_path: Path, job_dir: Path, *, job_id: str, source_name:
     java = str(Path(configured_java).expanduser().resolve()) if configured_java else (_which(["java", "/usr/bin/java"]) or "/usr/bin/java")
     command = [
         java,
+        "--add-opens=java.base/java.nio=ALL-UNNAMED",
         "-Djava.awt.headless=true",
         "-jar",
         str(jar),
@@ -812,24 +813,29 @@ def _process_layout_candidate(
     source_name: str,
     progress: Any,
     refresh_layout_sidecar: bool,
+    layout_executable: Optional[Path],
+    layout_runtime_root: Optional[Path],
+    cancel_event: Any,
 ) -> Optional[dict]:
-    """Serialize layout discovery so a fresh run cannot leak across workers."""
+    """Serialize layout execution while keeping backend selection request-scoped."""
     import layout_pipeline
 
     with LAYOUT_INVOCATION_LOCK:
-        original_finder = layout_pipeline._find_layout_sidecar
-        if refresh_layout_sidecar:
-            layout_pipeline._find_layout_sidecar = lambda _pdf, _name=None: _fresh_layout_backend(layout_pipeline)
-        try:
-            return layout_pipeline.process_layout_pdf(
-                pdf_path,
-                candidate_dir,
-                job_id=job_id,
-                source_name=source_name,
-                progress=progress,
-            )
-        finally:
-            layout_pipeline._find_layout_sidecar = original_finder
+        layout_source = None
+        if layout_executable is not None:
+            layout_source = (Path(layout_executable).expanduser().resolve(), "mineru-executable")
+        elif refresh_layout_sidecar:
+            layout_source = _fresh_layout_backend(layout_pipeline)
+        return layout_pipeline.process_layout_pdf(
+            pdf_path,
+            candidate_dir,
+            job_id=job_id,
+            source_name=source_name,
+            progress=progress,
+            layout_source=layout_source,
+            runtime_root=layout_runtime_root,
+            cancel_event=cancel_event,
+        )
 
 
 def process_pdf(
@@ -841,6 +847,9 @@ def process_pdf(
     progress=None,
     backend_override: Optional[str] = None,
     refresh_layout_sidecar: bool = False,
+    layout_executable: Optional[Path] = None,
+    layout_runtime_root: Optional[Path] = None,
+    cancel_event: Any = None,
 ) -> dict:
     """Convert a PDF with the layout-aware adapter, falling back to ODL.
 
@@ -868,6 +877,9 @@ def process_pdf(
                     source_name=source_name,
                     progress=_scaled_progress(progress, 0.0, 0.82) if backend == "auto" else progress,
                     refresh_layout_sidecar=refresh_layout_sidecar,
+                    layout_executable=layout_executable,
+                    layout_runtime_root=layout_runtime_root,
+                    cancel_event=cancel_event,
                 )
                 if manifest is not None:
                     quality = _semantic_validation(candidate_dir)

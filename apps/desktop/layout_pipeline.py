@@ -14,6 +14,7 @@ import json
 import math
 import os
 import re
+import signal
 import shutil
 import subprocess
 import sys
@@ -267,6 +268,15 @@ def _pdf_tools_root() -> Path:
 # Inline/display formula normalization and conservative candidate repair.
 class LayoutPipelineError(RuntimeError):
     """A recoverable layout conversion failure."""
+
+
+class LayoutPipelineCancelled(LayoutPipelineError):
+    """The caller cancelled layout conversion before publication."""
+
+
+def _raise_if_cancelled(cancel_event: Any) -> None:
+    if cancel_event is not None and cancel_event.is_set():
+        raise LayoutPipelineCancelled("AI 重排已取消。")
 
 
 def utc_now() -> str:
@@ -777,13 +787,14 @@ class MathRenderer:
         self.cache: Dict[Tuple[str, bool], str] = {}
         self.modes: Dict[Tuple[str, bool], str] = {}
         configured = os.environ.get("MY_SCHOLAR_PANDOC")
-        candidates = [
-            configured or "",
-            shutil.which("pandoc") or "",
-            "/opt/anaconda3/bin/pandoc",
-            "/opt/homebrew/bin/pandoc",
-            "/usr/local/bin/pandoc",
-        ]
+        candidates = [configured or ""]
+        if not getattr(sys, "frozen", False):
+            candidates.extend([
+                shutil.which("pandoc") or "",
+                "/opt/anaconda3/bin/pandoc",
+                "/opt/homebrew/bin/pandoc",
+                "/usr/local/bin/pandoc",
+            ])
         self.pandoc = next((path for path in candidates if path and Path(path).is_file()), None)
 
     @staticmethod
@@ -982,7 +993,7 @@ def _mineru_health_failure(executable: Path) -> Optional[str]:
     failure: Optional[str] = None
     try:
         with executable.open("r", encoding="utf-8", errors="replace") as stream:
-            first_line = stream.readline().strip()
+            first_line = stream.readline(4096).strip()
         if first_line.startswith("#!"):
             interpreter = first_line[2:].strip().split()[0]
             if interpreter.startswith("/") and not Path(interpreter).is_file():
@@ -1020,25 +1031,118 @@ def _find_formula_dir(pdf_path: Path, source_name: Optional[str] = None) -> Opti
     return None
 
 
-def _run_mineru(executable: Path, pdf_path: Path, output: Path) -> Path:
+def _stop_mineru_process(process: subprocess.Popen) -> str:
+    if process.poll() is None:
+        try:
+            if os.name == "posix":
+                os.killpg(process.pid, signal.SIGTERM)
+            else:
+                process.terminate()
+        except (OSError, ProcessLookupError):
+            pass
+    try:
+        stdout, _ = process.communicate(timeout=5)
+        return stdout or ""
+    except subprocess.TimeoutExpired:
+        try:
+            if os.name == "posix":
+                os.killpg(process.pid, signal.SIGKILL)
+            else:
+                process.kill()
+        except (OSError, ProcessLookupError):
+            pass
+        stdout, _ = process.communicate()
+        return stdout or ""
+
+
+def _run_mineru(
+    executable: Path,
+    pdf_path: Path,
+    output: Path,
+    *,
+    runtime_root: Optional[Path] = None,
+    cancel_event: Any = None,
+) -> Path:
+    executable = Path(executable).expanduser().resolve()
     output.mkdir(parents=True, exist_ok=True)
     command = [
         str(executable), "-p", str(pdf_path), "-o", str(output),
         "-b", os.environ.get("MY_SCHOLAR_MINERU_BACKEND", "pipeline"),
         "-m", "auto", "-f", "true", "-t", "true",
     ]
+    acquired = False
+    process: Optional[subprocess.Popen] = None
+    stdout = ""
     try:
-        with MINERU_SEMAPHORE:
-            completed = subprocess.run(
-                command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, encoding="utf-8", errors="replace", check=False,
-                timeout=int(os.environ.get("MY_SCHOLAR_MINERU_TIMEOUT", "900")),
-            )
-    except (OSError, subprocess.TimeoutExpired) as exc:
+        while not acquired:
+            _raise_if_cancelled(cancel_event)
+            acquired = MINERU_SEMAPHORE.acquire(timeout=0.2)
+        _raise_if_cancelled(cancel_event)
+        options: Dict[str, Any] = {
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.STDOUT,
+            "text": True,
+            "encoding": "utf-8",
+            "errors": "replace",
+        }
+        if os.name == "posix":
+            options["start_new_session"] = True
+        elif os.name == "nt":
+            options["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        if runtime_root is not None:
+            managed_root = Path(runtime_root).expanduser().resolve()
+            try:
+                executable.resolve().relative_to(managed_root)
+            except ValueError as exc:
+                raise LayoutPipelineError("MinerU 可执行文件不在受管组件目录中。") from exc
+            cache_root = managed_root / "runtime-cache"
+            temp_root = output / ".runtime-tmp"
+            cache_root.mkdir(parents=True, exist_ok=True)
+            temp_root.mkdir(parents=True, exist_ok=True)
+            environment = dict(os.environ)
+            for key in ("CONDA_PREFIX", "PYTHONHOME", "PYTHONPATH", "VIRTUAL_ENV"):
+                environment.pop(key, None)
+            environment.update({
+                "PATH": f"{executable.parent}:/usr/bin:/bin:/usr/sbin:/sbin",
+                "PYTHONNOUSERSITE": "1",
+                "HF_HUB_OFFLINE": "1",
+                "HF_DATASETS_OFFLINE": "1",
+                "TRANSFORMERS_OFFLINE": "1",
+                "HF_HOME": str(cache_root / "huggingface"),
+                "MODELSCOPE_CACHE": str(cache_root / "modelscope"),
+                "XDG_CACHE_HOME": str(cache_root),
+                "TMPDIR": str(temp_root),
+                "MY_SCHOLAR_MINERU_COMPONENT_ROOT": str(managed_root),
+            })
+            options["cwd"] = str(managed_root)
+            options["env"] = environment
+        process = subprocess.Popen(command, **options)
+        deadline = time.monotonic() + int(os.environ.get("MY_SCHOLAR_MINERU_TIMEOUT", "900"))
+        while True:
+            if cancel_event is not None and cancel_event.is_set():
+                stdout = _stop_mineru_process(process)
+                raise LayoutPipelineCancelled("AI 重排已取消。")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                stdout = _stop_mineru_process(process)
+                raise LayoutPipelineError("MinerU 运行超时。")
+            try:
+                stdout, _ = process.communicate(timeout=min(0.25, remaining))
+                break
+            except subprocess.TimeoutExpired:
+                continue
+    except LayoutPipelineError:
+        raise
+    except OSError as exc:
         raise LayoutPipelineError(f"MinerU 运行失败：{exc}") from exc
-    (output / "mineru.log").write_text(completed.stdout or "", encoding="utf-8")
-    if completed.returncode != 0:
-        raise LayoutPipelineError(f"MinerU 退出码 {completed.returncode}，详见 mineru.log")
+    finally:
+        if acquired:
+            MINERU_SEMAPHORE.release()
+        if stdout or process is not None:
+            (output / "mineru.log").write_text(stdout or "", encoding="utf-8")
+    if process is None or process.returncode != 0:
+        returncode = process.returncode if process is not None else "unknown"
+        raise LayoutPipelineError(f"MinerU 退出码 {returncode}，详见 mineru.log")
     matches = sorted(output.rglob("*_content_list_v2.json"))
     if not matches:
         raise LayoutPipelineError("MinerU 未生成 content_list_v2.json")
@@ -1156,6 +1260,7 @@ def _render_pages(pdf_path: Path, target: Path, page_count: int, dpi: int = 144)
     if renderer_classpath and configured_java:
         command = [
             str(Path(configured_java).expanduser().resolve()),
+            "--add-opens=java.base/java.nio=ALL-UNNAMED",
             "-Djava.awt.headless=true",
             "-cp",
             renderer_classpath,
@@ -1175,6 +1280,8 @@ def _render_pages(pdf_path: Path, target: Path, page_count: int, dpi: int = 144)
         for name in rendered:
             (target / name).unlink(missing_ok=True)
         rendered = []
+    if getattr(sys, "frozen", False):
+        return []
     pdftoppm = _which(["pdftoppm", "/opt/homebrew/bin/pdftoppm"])
     if not pdftoppm:
         return []
@@ -2396,11 +2503,15 @@ def process_layout_pdf(
     source_name: str,
     progress=None,
     render_budget: Optional[LayoutRenderBudget] = None,
+    layout_source: Optional[Tuple[Optional[Path], str]] = None,
+    runtime_root: Optional[Path] = None,
+    cancel_event: Any = None,
 ) -> Optional[dict]:
     """Build a layout-aware job, or return ``None`` when no backend is usable."""
     pdf_path = Path(pdf_path).resolve()
     job_dir = Path(job_dir).resolve()
-    sidecar_or_bin, source_kind = _find_layout_sidecar(pdf_path, source_name)
+    _raise_if_cancelled(cancel_event)
+    sidecar_or_bin, source_kind = layout_source or _find_layout_sidecar(pdf_path, source_name)
     if sidecar_or_bin is None:
         return None
     if progress:
@@ -2410,13 +2521,21 @@ def process_layout_pdf(
     shutil.copy2(pdf_path, source_copy)
     layout_dir = job_dir / "layout"
     if source_kind == "mineru-executable":
-        sidecar = _run_mineru(sidecar_or_bin, source_copy, layout_dir)
+        sidecar = _run_mineru(
+            sidecar_or_bin,
+            source_copy,
+            layout_dir,
+            runtime_root=runtime_root,
+            cancel_event=cancel_event,
+        )
         backend_name = "MinerU local pipeline"
     else:
         sidecar = sidecar_or_bin
         backend_name = "MinerU cached layout sidecar"
+    _raise_if_cancelled(cancel_event)
     raw_pages = _load_layout_sidecar(sidecar)
     pdf_evidence = _extract_pdf_evidence_isolated(source_copy, raw_pages, job_dir)
+    _raise_if_cancelled(cancel_event)
     ir = mineru_to_ir(
         raw_pages,
         backend=backend_name,
@@ -2427,6 +2546,7 @@ def process_layout_pdf(
     assets = job_dir / "assets" / "images"
     active_budget = render_budget or LayoutRenderBudget()
     mapping = _copy_sidecar_images(sidecar, assets, budget=active_budget)
+    _raise_if_cancelled(cancel_event)
     visual_dpi = _visual_crop_base_dpi()
     visual_asset_metadata: Dict[str, Dict[str, Any]] = {}
     visual_assets = _render_pdf_visual_crops(
@@ -2437,8 +2557,10 @@ def process_layout_pdf(
         metadata=visual_asset_metadata,
         budget=active_budget,
     )
+    _raise_if_cancelled(cancel_event)
     render_budget_report = active_budget.report()
     page_assets = _render_pages(source_copy, job_dir / "pages", len(pages), dpi=int(os.environ.get("MY_SCHOLAR_PAGE_DPI", "144")))
+    _raise_if_cancelled(cancel_event)
     formula_dir = _find_formula_dir(pdf_path, source_name)
     formula_candidates = _load_formula_candidates(formula_dir)
     display_formulas = {

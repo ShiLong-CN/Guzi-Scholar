@@ -21,10 +21,12 @@ import json
 import math
 import mimetypes
 import os
+import platform
 import queue
 import re
 import signal
 import shutil
+import sys
 import threading
 import time
 import unicodedata
@@ -50,6 +52,7 @@ from ai import auto_highlights, chat as ai_chat, chat_stream as ai_chat_stream, 
 from bibliography import is_fragmented_metadata_text, retrieve_bibliographic_metadata, retrieve_reference_evidence
 from library_store import LibraryStore, LibraryValidationError
 from layout_pipeline import MathRenderer
+from parsing_providers import ProviderError, ParsingRequest, create_default_registry
 from pipeline import PipelineError, process_pdf, utc_now
 
 
@@ -57,6 +60,7 @@ PROJECT_ROOT = Path(os.environ.get("MY_SCHOLAR_PROJECT_ROOT", str(Path(__file__)
 WEB_ROOT = PROJECT_ROOT / "web"
 DATA_ROOT = Path(os.environ.get("MY_SCHOLAR_DATA_DIR", str(PROJECT_ROOT / "data"))).expanduser().resolve()
 LIBRARY_ROOT = Path(os.environ.get("MY_SCHOLAR_LIBRARY_DIR", str(DATA_ROOT))).expanduser().resolve()
+COMPONENTS_ROOT = Path(os.environ.get("MY_SCHOLAR_COMPONENTS_DIR", str(DATA_ROOT / "components"))).expanduser().resolve()
 JOBS_ROOT = LIBRARY_ROOT / "jobs"
 MAX_UPLOAD_BYTES = int(os.environ.get("MY_SCHOLAR_MAX_UPLOAD_BYTES", str(100 * 1024 * 1024)))
 MAX_NOTE_ASSET_BYTES = 5 * 1024 * 1024
@@ -83,6 +87,12 @@ METADATA_WORKERS = max(1, min(4, int(os.environ.get("MY_SCHOLAR_METADATA_WORKERS
 CONVERSION_QUEUE: "queue.Queue[tuple[str, str]]" = queue.Queue()
 REFLOW_QUEUE: "queue.Queue[tuple[str, str, int]]" = queue.Queue()
 METADATA_QUEUE: "queue.Queue[tuple[str, bool, str, int]]" = queue.Queue()
+REFLOW_CANCEL_LOCK = threading.RLock()
+REFLOW_CANCEL_EVENTS: Dict[tuple[str, int], threading.Event] = {}
+PARSING_PROVIDER_LOCK = threading.RLock()
+PARSING_PROVIDERS: Any = None
+PARSING_INSTALL_THREAD: Optional[threading.Thread] = None
+PARSING_INSTALL_CANCEL_EVENT: Optional[threading.Event] = None
 METADATA_STATE_LOCK = threading.RLock()
 METADATA_PENDING: set[tuple[str, str, int]] = set()
 METADATA_GENERATIONS: Dict[str, int] = {}
@@ -115,6 +125,10 @@ class AccountServiceUnavailable(PipelineError):
 
 class ReflowConflictError(PipelineError):
     """The requested document cannot start another reflow generation."""
+
+
+class ReflowCancelledError(PipelineError):
+    """The active reflow was cancelled before its render was published."""
 
 
 class DataRootLock:
@@ -1603,7 +1617,7 @@ class JobStore:
                 except (TypeError, ValueError, OverflowError):
                     reflow_generation = 1
                 reflow_status = str(reflow.get("status") or "failed")
-                if reflow_status not in {"queued", "running", "completed", "failed"}:
+                if reflow_status not in {"queued", "running", "cancelling", "cancelled", "completed", "failed"}:
                     reflow_status = "failed"
                 normalized_reflow = {
                     "status": reflow_status,
@@ -1612,12 +1626,11 @@ class JobStore:
                     "generation": reflow_generation,
                     "error": str(reflow.get("error") or "")[:500],
                 }
-                if normalized_reflow["status"] in {"queued", "running"}:
+                if normalized_reflow["status"] in {"queued", "running", "cancelling"}:
                     normalized_reflow.update({
-                        "status": "failed",
-                        "stage": "重新排版已中断",
-                        "progress": 1.0,
-                        "error": "应用退出时重新排版尚未完成，当前阅读版本未受影响。",
+                        "status": "cancelled" if normalized_reflow["status"] == "cancelling" else "failed",
+                        "stage": "重新排版已取消" if normalized_reflow["status"] == "cancelling" else "重新排版已中断",
+                        "error": "应用退出前正在取消重新排版，当前阅读版本未受影响。" if normalized_reflow["status"] == "cancelling" else "应用退出时重新排版尚未完成，当前阅读版本未受影响。",
                     })
                 record["reflow"] = normalized_reflow
             for key in ("requested_folder_ids", "metrics", "metadata_status", "metadata_phase", "metadata_seconds", "metadata_venue"):
@@ -1885,7 +1898,7 @@ class JobStore:
             if record.get("status") != "completed":
                 raise ReflowConflictError("只有已完成转换的文献可以重新排版。")
             current_reflow = record.get("reflow")
-            if isinstance(current_reflow, dict) and current_reflow.get("status") in {"queued", "running"}:
+            if isinstance(current_reflow, dict) and current_reflow.get("status") in {"queued", "running", "cancelling"}:
                 raise ReflowConflictError("这篇文献正在重新排版，请勿重复提交。")
             job_dir = Path(str(record["job_dir"]))
             source_path = job_dir / "source.pdf"
@@ -1933,12 +1946,21 @@ class JobStore:
                 raise
             return dict(record)
 
-    def update_reflow(self, job_id: str, generation: int, **fields: Any) -> bool:
+    def update_reflow(
+        self,
+        job_id: str,
+        generation: int,
+        *,
+        expected_statuses: Optional[set[str]] = None,
+        **fields: Any,
+    ) -> bool:
         with self.lock:
             canonical_id = self.resolve_id(job_id)
             record = self.jobs.get(canonical_id)
             reflow = record.get("reflow") if record else None
             if not isinstance(reflow, dict) or int(reflow.get("generation") or 0) != int(generation):
+                return False
+            if expected_statuses is not None and str(reflow.get("status") or "") not in expected_statuses:
                 return False
             previous = dict(record)
             record["reflow"] = {**reflow, **fields}
@@ -1949,6 +1971,42 @@ class JobStore:
                 self.jobs[canonical_id] = previous
                 raise
             return True
+
+    def request_reflow_cancel(self, job_id: str) -> Dict[str, Any]:
+        with self.lock:
+            canonical_id = self.resolve_id(job_id)
+            record = self.jobs.get(canonical_id)
+            if record is None:
+                raise KeyError(job_id)
+            reflow = record.get("reflow")
+            if not isinstance(reflow, dict):
+                raise ReflowConflictError("这篇文献没有可取消的重新排版任务。")
+            status = str(reflow.get("status") or "")
+            if status == "queued":
+                next_reflow = {
+                    **reflow,
+                    "status": "cancelled",
+                    "stage": "重新排版已取消",
+                    "error": "用户已取消重新排版，当前阅读版本未受影响。",
+                }
+            elif status in {"running", "cancelling"}:
+                next_reflow = {
+                    **reflow,
+                    "status": "cancelling",
+                    "stage": "正在取消重新排版",
+                    "error": "",
+                }
+            else:
+                raise ReflowConflictError("当前没有正在进行的重新排版任务。")
+            previous = dict(record)
+            record["reflow"] = next_reflow
+            record["updated_at"] = utc_now()
+            try:
+                self._persist_locked(record)
+            except Exception:
+                self.jobs[canonical_id] = previous
+                raise
+            return dict(record)
 
     def complete_reflow(self, job_id: str, generation: int, manifest: Dict[str, Any], metrics: Dict[str, Any]) -> bool:
         with self.lock:
@@ -2047,7 +2105,7 @@ def _library_migration_status() -> Dict[str, Any]:
         str(record.get("job_id") or "")
         for record in records
         if record.get("status") in {"queued", "running"}
-        or (isinstance(record.get("reflow"), dict) and record["reflow"].get("status") in {"queued", "running"})
+        or (isinstance(record.get("reflow"), dict) and record["reflow"].get("status") in {"queued", "running", "cancelling"})
     ]
     with METADATA_STATE_LOCK:
         metadata_pending = len(METADATA_PENDING)
@@ -2311,7 +2369,14 @@ def _run_conversion_job(job_id: str, source_name: str) -> None:
 
     try:
         attempt_dir.mkdir(parents=True, exist_ok=False)
-        manifest = process_pdf(job_dir / "upload.pdf", attempt_dir, job_id=job_id, source_name=source_name, progress=progress)
+        manifest = process_pdf(
+            job_dir / "upload.pdf",
+            attempt_dir,
+            job_id=job_id,
+            source_name=source_name,
+            progress=progress,
+            backend_override="odl",
+        )
         source = manifest.setdefault("source", {})
         if record.get("source_sha256"):
             source["sha256"] = record["source_sha256"]
@@ -2378,9 +2443,50 @@ def _validate_reflow_render(render_dir: Path) -> Dict[str, Any]:
     return manifest
 
 
+def _reflow_cancel_event(job_id: str, generation: int) -> threading.Event:
+    key = (str(job_id), int(generation))
+    with REFLOW_CANCEL_LOCK:
+        return REFLOW_CANCEL_EVENTS.setdefault(key, threading.Event())
+
+
+def _forget_reflow_cancel_event(job_id: str, generation: int) -> None:
+    with REFLOW_CANCEL_LOCK:
+        REFLOW_CANCEL_EVENTS.pop((str(job_id), int(generation)), None)
+
+
+def _parsing_provider_registry() -> Any:
+    global PARSING_PROVIDERS
+    with PARSING_PROVIDER_LOCK:
+        if PARSING_PROVIDERS is None:
+            PARSING_PROVIDERS = create_default_registry(COMPONENTS_ROOT)
+        return PARSING_PROVIDERS
+
+
+def _provider_failure(capability: Dict[str, Any]) -> ProviderError:
+    code = str(capability.get("reason_code") or capability.get("state") or "not_installed")
+    message = str(capability.get("message") or "版面解析服务当前不可用。")
+    return ProviderError(message, code=code, details={"provider": capability})
+
+
+def _run_provider_install(provider_id: str, cancel_event: threading.Event) -> None:
+    global PARSING_INSTALL_CANCEL_EVENT, PARSING_INSTALL_THREAD
+    try:
+        _parsing_provider_registry().get(provider_id).install(cancel_event=cancel_event)
+    except ProviderError as exc:
+        print(f"[components] {provider_id} 安装失败：{exc}", flush=True)
+    except Exception as exc:
+        print(f"[components] {provider_id} 安装异常：{type(exc).__name__}: {exc}", flush=True)
+    finally:
+        with PARSING_PROVIDER_LOCK:
+            PARSING_INSTALL_THREAD = None
+            PARSING_INSTALL_CANCEL_EVENT = None
+
+
 def _run_reflow_job(job_id: str, source_name: str, generation: int) -> None:
+    cancel_event = _reflow_cancel_event(job_id, generation)
     record = STORE.claim_reflow(job_id, generation)
     if not record:
+        _forget_reflow_cancel_event(job_id, generation)
         return
     job_dir = Path(str(record["job_dir"]))
     source_path = job_dir / "source.pdf"
@@ -2390,15 +2496,20 @@ def _run_reflow_job(job_id: str, source_name: str, generation: int) -> None:
     started = time.perf_counter()
 
     def progress(stage: str, fraction: float) -> None:
+        if cancel_event.is_set():
+            raise ReflowCancelledError("用户已取消重新排版。")
         STORE.update_reflow(
             job_id,
             generation,
+            expected_statuses={"running"},
             status="running",
             stage=stage,
             progress=max(0.02, min(0.98, float(fraction))),
         )
 
     try:
+        if cancel_event.is_set():
+            raise ReflowCancelledError("用户已取消重新排版。")
         if not source_path.is_file():
             raise PipelineError("原始 source.pdf 不存在，无法安全重新排版。")
         digest = JobStore._hash_file(source_path)
@@ -2407,30 +2518,42 @@ def _run_reflow_job(job_id: str, source_name: str, generation: int) -> None:
             raise PipelineError("原始 PDF 校验失败，已取消重新排版。")
         renders_root.mkdir(parents=True, exist_ok=True)
         attempt_dir.mkdir(parents=False, exist_ok=False)
-        manifest = process_pdf(
-            source_path,
-            attempt_dir,
-            job_id=job_id,
-            source_name=source_name,
+        provider_result = _parsing_provider_registry().get("local-mineru").run(
+            ParsingRequest(
+                job_id=job_id,
+                source_pdf=source_path,
+                output_dir=attempt_dir,
+                source_name=source_name,
+                generation=generation,
+            ),
             progress=progress,
-            backend_override="layout",
-            refresh_layout_sidecar=True,
+            cancel_event=cancel_event,
         )
+        manifest = provider_result.manifest
+        if cancel_event.is_set():
+            raise ReflowCancelledError("用户已取消重新排版。")
         source = manifest.setdefault("source", {})
         source["sha256"] = digest
         manifest = _rebase_manifest_paths(manifest, attempt_dir, final_dir)
         (attempt_dir / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
         _validate_reflow_render(attempt_dir)
+        if cancel_event.is_set():
+            raise ReflowCancelledError("用户已取消重新排版。")
         if final_dir.exists():
             raise PipelineError("重新排版 generation 已存在，未覆盖任何文件。")
         os.replace(attempt_dir, final_dir)
+        if cancel_event.is_set():
+            shutil.rmtree(final_dir, ignore_errors=True)
+            raise ReflowCancelledError("用户已取消重新排版。")
         published_manifest = _validate_reflow_render(final_dir)
         metrics = {
+            **provider_result.metrics,
             "generation": generation,
             "conversion_seconds": round(time.perf_counter() - started, 3),
             "validation": str(published_manifest.get("validation", {}).get("status") or ""),
         }
         if not STORE.complete_reflow(job_id, generation, published_manifest, metrics):
+            shutil.rmtree(final_dir, ignore_errors=True)
             raise PipelineError("重新排版任务状态已变化，新版本未启用。")
         try:
             _enqueue_metadata(job_id, False, "refine", force=True)
@@ -2439,16 +2562,23 @@ def _run_reflow_job(job_id: str, source_name: str, generation: int) -> None:
     except Exception as exc:
         shutil.rmtree(attempt_dir, ignore_errors=True)
         try:
+            current = STORE.get(job_id) or {}
+            if int(current.get("active_render") or 0) != int(generation):
+                shutil.rmtree(final_dir, ignore_errors=True)
+            reflow = current.get("reflow") if isinstance(current.get("reflow"), dict) else {}
+            cancelled = cancel_event.is_set() or isinstance(exc, ReflowCancelledError) or reflow.get("status") == "cancelling"
             STORE.update_reflow(
                 job_id,
                 generation,
-                status="failed",
-                stage="重新排版失败",
-                progress=1.0,
-                error=str(exc)[:500],
+                expected_statuses={"running", "cancelling"},
+                status="cancelled" if cancelled else "failed",
+                stage="重新排版已取消" if cancelled else "重新排版失败",
+                error="用户已取消重新排版，当前阅读版本未受影响。" if cancelled else str(exc)[:500],
             )
         except Exception as persist_error:
             print(f"[reflow] 无法保存任务 {job_id} 的失败状态：{persist_error}", flush=True)
+    finally:
+        _forget_reflow_cancel_event(job_id, generation)
 
 
 def _reflow_worker() -> None:
@@ -2564,8 +2694,20 @@ class ScholarHandler(BaseHTTPRequestHandler):
             payload = _redact_local_paths(payload)
         return self._send_bytes(_json_bytes(payload), "application/json; charset=utf-8", status)
 
-    def _send_error_json(self, message: str, status: int = HTTPStatus.BAD_REQUEST) -> None:
-        self._send_json({"error": message}, status)
+    def _send_error_json(
+        self,
+        message: str,
+        status: int = HTTPStatus.BAD_REQUEST,
+        *,
+        code: str = "",
+        details: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        payload: Dict[str, Any] = {"error": message}
+        if code:
+            payload["code"] = code
+        if details:
+            payload["details"] = details
+        self._send_json(payload, status)
 
     def _require_ai_entitlement(self) -> bool:
         if not AI_REQUIRES_MEMBER:
@@ -2635,7 +2777,7 @@ class ScholarHandler(BaseHTTPRequestHandler):
             self._send_json({
                 "ok": True,
                 "service": "my-scholar",
-                "version": "0.1.0",
+                "version": "0.1.1",
                 "readonly": READONLY_MODE,
                 "shell": os.environ.get("MY_SCHOLAR_SHELL", "reference"),
                 "ai": ai,
@@ -2656,6 +2798,9 @@ class ScholarHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/settings":
             self._send_json(_public_settings())
+            return
+        if path == "/api/parsing/providers":
+            self._send_json({"providers": _parsing_provider_registry().list_capabilities()})
             return
         if path == "/api/jobs":
             jobs = STORE.list()
@@ -2830,6 +2975,12 @@ class ScholarHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/migration/cancel":
             self._cancel_library_migration()
+            return
+        if path == "/api/parsing/providers/local-mineru/install":
+            self._start_provider_install("local-mineru")
+            return
+        if path == "/api/parsing/providers/local-mineru/install/cancel":
+            self._cancel_provider_install("local-mineru")
             return
         ai_execution = path in {"/api/ai/test", "/api/ai/models"} or re.fullmatch(
             r"/api/jobs/[a-f0-9]{12,40}/(?:translate|chat|auto-highlights|ai-review|reference-summary|reflow)",
@@ -3117,6 +3268,13 @@ class ScholarHandler(BaseHTTPRequestHandler):
     def do_DELETE(self) -> None:  # noqa: N802 - stdlib handler API
         parsed = urlsplit(self.path)
         path = unquote(parsed.path)
+        match = re.fullmatch(r"/api/jobs/([a-f0-9]{12,40})/reflow", path)
+        if match:
+            self._cancel_reflow(match.group(1))
+            return
+        if path == "/api/parsing/providers/local-mineru/component":
+            self._remove_provider_component("local-mineru")
+            return
         match = re.fullmatch(r"/api/library/folders/([^/]+)", path)
         if match:
             self._delete_library_folder(match.group(1))
@@ -3923,12 +4081,112 @@ class ScholarHandler(BaseHTTPRequestHandler):
         status = HTTPStatus.OK if deduplicated and record.get("status") == "completed" else HTTPStatus.ACCEPTED
         self._send_json({"job": _public_job(record), "deduplicated": deduplicated, "warning": "；".join(warnings)}, status)
 
+    def _send_provider_error(self, error: ProviderError) -> None:
+        self._send_error_json(
+            str(error),
+            int(error.http_status),
+            code=error.code,
+            details=error.details,
+        )
+
+    def _start_provider_install(self, provider_id: str) -> None:
+        global PARSING_INSTALL_CANCEL_EVENT, PARSING_INSTALL_THREAD
+        try:
+            with PARSING_PROVIDER_LOCK:
+                provider = _parsing_provider_registry().get(provider_id)
+                capability = provider.capability()
+                if capability.get("ready") and not capability.get("update_available"):
+                    self._send_json({"provider": capability})
+                    return
+                if any(
+                    isinstance(record.get("reflow"), dict)
+                    and record["reflow"].get("status") in {"queued", "running", "cancelling"}
+                    for record in (STORE.list() if STORE is not None else [])
+                ):
+                    raise ProviderError("AI 重排正在使用版面引擎，暂不能安装或更新。", code="busy")
+                if not capability.get("can_install"):
+                    raise _provider_failure(capability)
+                if PARSING_INSTALL_THREAD is not None and PARSING_INSTALL_THREAD.is_alive():
+                    raise ProviderError("版面引擎安装正在进行中。", code="busy")
+                cancel_event = threading.Event()
+                thread = threading.Thread(
+                    target=_run_provider_install,
+                    args=(provider_id, cancel_event),
+                    name="my-scholar-component-install",
+                    daemon=True,
+                )
+                PARSING_INSTALL_CANCEL_EVENT = cancel_event
+                PARSING_INSTALL_THREAD = thread
+                thread.start()
+            self._send_json({
+                "provider": {
+                    **capability,
+                    "state": "installing",
+                    "reason_code": "installing",
+                    "stage": "正在启动安装",
+                    "progress": 0.0,
+                }
+            }, HTTPStatus.ACCEPTED)
+        except ProviderError as exc:
+            self._send_provider_error(exc)
+
+    def _cancel_provider_install(self, provider_id: str) -> None:
+        try:
+            provider = _parsing_provider_registry().get(provider_id)
+            with PARSING_PROVIDER_LOCK:
+                install_running = PARSING_INSTALL_THREAD is not None and PARSING_INSTALL_THREAD.is_alive()
+                if install_running and PARSING_INSTALL_CANCEL_EVENT is not None:
+                    PARSING_INSTALL_CANCEL_EVENT.set()
+            if not provider.cancel_install() and not install_running:
+                raise ProviderError("当前没有正在进行的版面引擎安装。", code="install_conflict")
+            self._send_json({"provider": provider.status()}, HTTPStatus.ACCEPTED)
+        except ProviderError as exc:
+            self._send_provider_error(exc)
+
+    def _remove_provider_component(self, provider_id: str) -> None:
+        try:
+            with PARSING_PROVIDER_LOCK:
+                active = [
+                    record
+                    for record in STORE.list()
+                    if isinstance(record.get("reflow"), dict)
+                    and record["reflow"].get("status") in {"queued", "running", "cancelling"}
+                ]
+                if active:
+                    self._send_error_json(
+                        "AI 重排正在使用版面引擎，暂不能删除。",
+                        HTTPStatus.CONFLICT,
+                        code="provider_busy",
+                    )
+                    return
+                provider = _parsing_provider_registry().get(provider_id)
+                result = provider.remove()
+            self._send_json({"provider": result})
+        except ProviderError as exc:
+            self._send_provider_error(exc)
+
     def _start_reflow(self, job_id: str) -> None:
         if READONLY_MODE:
             self._send_error_json("只读演示模式，暂不支持修改。", HTTPStatus.FORBIDDEN)
             return
+        current_record = STORE.get(job_id)
+        if current_record is None:
+            self._send_error_json("任务不存在。", HTTPStatus.NOT_FOUND)
+            return
+        if current_record.get("status") != "completed":
+            self._send_error_json("只有已完成转换的文献可以重新排版。", HTTPStatus.CONFLICT)
+            return
         try:
-            record = STORE.begin_reflow(job_id)
+            with PARSING_PROVIDER_LOCK:
+                if PARSING_INSTALL_THREAD is not None and PARSING_INSTALL_THREAD.is_alive():
+                    raise ProviderError("版面引擎正在安装或更新，请完成后再开始 AI 重排。", code="busy")
+                capability = _parsing_provider_registry().get("local-mineru").capability()
+                if not capability.get("ready"):
+                    raise _provider_failure(capability)
+                record = STORE.begin_reflow(job_id)
+        except ProviderError as exc:
+            self._send_provider_error(exc)
+            return
         except KeyError:
             self._send_error_json("任务不存在。", HTTPStatus.NOT_FOUND)
             return
@@ -3938,6 +4196,25 @@ class ScholarHandler(BaseHTTPRequestHandler):
         reflow = record.get("reflow") if isinstance(record.get("reflow"), dict) else {}
         generation = int(reflow.get("generation") or 0)
         REFLOW_QUEUE.put((str(record["job_id"]), str(record.get("source_filename") or "document.pdf"), generation))
+        current = STORE.get(str(record["job_id"])) or record
+        self._send_json(_public_job(current), HTTPStatus.ACCEPTED)
+
+    def _cancel_reflow(self, job_id: str) -> None:
+        if READONLY_MODE:
+            self._send_error_json("只读演示模式，暂不支持修改。", HTTPStatus.FORBIDDEN)
+            return
+        try:
+            record = STORE.request_reflow_cancel(job_id)
+        except KeyError:
+            self._send_error_json("任务不存在。", HTTPStatus.NOT_FOUND)
+            return
+        except ReflowConflictError as exc:
+            self._send_error_json(str(exc), HTTPStatus.CONFLICT, code="reflow_not_active")
+            return
+        reflow = record.get("reflow") if isinstance(record.get("reflow"), dict) else {}
+        generation = int(reflow.get("generation") or 0)
+        if generation:
+            _reflow_cancel_event(str(record["job_id"]), generation).set()
         current = STORE.get(str(record["job_id"])) or record
         self._send_json(_public_job(current), HTTPStatus.ACCEPTED)
 
@@ -4119,7 +4396,28 @@ def main() -> None:
     parser.add_argument("--pdf-evidence-input", help=argparse.SUPPRESS)
     parser.add_argument("--pdf-evidence-output", help=argparse.SUPPRESS)
     parser.add_argument("--pdf-evidence-drawing-pages", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--dependency-smoke", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.dependency_smoke:
+        import sqlite3
+        import ssl
+        import urllib.request
+
+        connection = sqlite3.connect(":memory:")
+        try:
+            connection.execute("SELECT 1").fetchone()
+        finally:
+            connection.close()
+        ssl.create_default_context()
+        urllib.request.Request("https://example.invalid/")
+        print(json.dumps({
+            "ok": True,
+            "python": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
+            "arch": platform.machine(),
+            "hashlib_scrypt": hasattr(hashlib, "scrypt"),
+            "providers": _parsing_provider_registry().list_capabilities(),
+        }, ensure_ascii=False))
+        return
     if args.pdf_evidence_input or args.pdf_evidence_output:
         if not (args.pdf_evidence_input and args.pdf_evidence_output):
             parser.error("PDF evidence worker requires both input and output paths")

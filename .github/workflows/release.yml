@@ -4,6 +4,16 @@ on:
   push:
     tags: ['v*.*.*']
   workflow_dispatch:
+    inputs:
+      publish_release:
+        description: Publish the rebuilt macOS artifact as a GitHub Release
+        required: true
+        default: false
+        type: boolean
+      release_tag:
+        description: Existing vX.Y.Z tag to rebuild and publish (required when publishing)
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -15,6 +25,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag != '' && format('refs/tags/{0}', inputs.release_tag) || github.ref }}
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
@@ -31,11 +43,11 @@ jobs:
           distribution: temurin
           java-version: '21'
       - name: Install macOS build helpers
-        run: python3 -m pip install --disable-pip-version-check certifi
+        run: python3 -m pip install --disable-pip-version-check certifi==2025.8.3
       - name: Install desktop dependencies
         run: npm ci --prefix apps/desktop
       - name: Check shared desktop code
-        run: npm run desktop:check:syntax
+        run: npm run desktop:check
       - name: Download and verify OpenDataLoader CLI
         shell: bash
         run: |
@@ -44,8 +56,22 @@ jobs:
           echo "MY_SCHOLAR_ODL_SHA256=104a5523c812ba3a43a3c7dd6156e33f23d0e32f03ef1ac629009ef96d7a79e1" >> "$GITHUB_ENV"
           echo "MY_SCHOLAR_BUILD_PYTHON=$(command -v python3)" >> "$GITHUB_ENV"
           echo "MY_SCHOLAR_JAVA_HOME=$JAVA_HOME" >> "$GITHUB_ENV"
-      - name: Build internal macOS DMG
-        run: npm --prefix apps/desktop run dist:mac:internal
+      - name: Build gated macOS package
+        env:
+          PUBLISH_RELEASE: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_release }}
+          CSC_LINK: ${{ secrets.MACOS_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.MACOS_CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [[ "$PUBLISH_RELEASE" == "true" ]]; then
+            npm --prefix apps/desktop run dist:mac
+          else
+            npm --prefix apps/desktop run dist:mac:internal
+          fi
+      - name: Verify packaged runtime boundary
+        run: node apps/desktop/tests/mac_release_test.js "apps/desktop/dist/mac.noindex/mac-arm64/谷子学术.app"
       - name: Upload macOS artifact
         uses: actions/upload-artifact@v4
         with:
@@ -53,50 +79,22 @@ jobs:
           path: apps/desktop/dist/mac.noindex/*.dmg
           if-no-files-found: error
 
-  windows:
-    name: Build Windows x64
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: windows-2022
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Set up Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: apps/desktop/package-lock.json
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - name: Install desktop dependencies
-        run: npm ci --prefix apps/desktop
-      - name: Check shared desktop code
-        run: npm run desktop:check:syntax
-      - name: Build Windows installer and portable package
-        shell: pwsh
-        working-directory: platforms/windows
-        run: >-
-          ../../apps/desktop/node_modules/.bin/electron-builder.cmd
-          --win --x64 --config electron-builder.win.json
-      - name: Upload Windows artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: guzi-scholar-windows-x64
-          path: |
-            platforms/windows/dist/*.exe
-            platforms/windows/dist/*.zip
-          if-no-files-found: error
-
   publish:
-    name: Publish one GitHub Release
-    if: startsWith(github.ref, 'refs/tags/v')
+    name: Manually publish one GitHub Release
+    if: github.event_name == 'workflow_dispatch' && inputs.publish_release == true
     needs: [macos]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
+      - name: Validate the explicit publish gate
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Manual publishing requires an existing vX.Y.Z release_tag." >&2
+            exit 1
+          fi
       - name: Download macOS artifact
         uses: actions/download-artifact@v4
         with:
@@ -108,4 +106,5 @@ jobs:
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${GITHUB_REF_NAME}" release/* --repo "${GITHUB_REPOSITORY}" --generate-notes --title "Guzi Scholar ${GITHUB_REF_NAME}"
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: gh release create "$RELEASE_TAG" release/* --repo "${GITHUB_REPOSITORY}" --verify-tag --generate-notes --title "Guzi Scholar $RELEASE_TAG"

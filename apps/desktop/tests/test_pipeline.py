@@ -149,8 +149,8 @@ class PipelineHelpersTest(unittest.TestCase):
         original_finder = layout_pipeline._find_layout_sidecar
         fresh_executable = Path("/private/tmp/fresh-mineru")
 
-        def fake_layout(pdf_path, candidate_dir, **_kwargs):
-            self.assertEqual(layout_pipeline._find_layout_sidecar(Path(pdf_path), "paper.pdf"), (fresh_executable, "mineru-executable"))
+        def fake_layout(_pdf_path, candidate_dir, **kwargs):
+            self.assertEqual(kwargs["layout_source"], (fresh_executable, "mineru-executable"))
             candidate_dir = Path(candidate_dir)
             candidate_dir.mkdir(parents=True, exist_ok=True)
             (candidate_dir / "document.json").write_text(json.dumps({

@@ -6,6 +6,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 import types
 import unittest
 from pathlib import Path
@@ -31,17 +32,92 @@ from layout_pipeline import (  # noqa: E402
     _pdf_tools_root,
     _render_pdf_visual_crops,
     _render_pages,
+    _run_mineru,
     _safe_inline,
     _special_tokens,
     _title_html,
     _text_from_content,
     _visual_crop_base_dpi,
     MathRenderer,
+    LayoutPipelineCancelled,
+    LayoutPipelineError,
     process_layout_pdf,
 )
 
 
 class LayoutPipelineTest(unittest.TestCase):
+    def test_packaged_math_renderer_does_not_use_an_unmanaged_system_pandoc(self) -> None:
+        with patch.object(sys, "frozen", True, create=True), patch.dict(
+            os.environ, {"MY_SCHOLAR_PANDOC": ""}
+        ), patch("layout_pipeline.shutil.which", return_value="/opt/homebrew/bin/pandoc"):
+            self.assertIsNone(MathRenderer().pandoc)
+
+    def test_mineru_cancel_terminates_its_process_group(self) -> None:
+        cancel = threading.Event()
+
+        class HangingProcess:
+            pid = 43210
+            returncode = None
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def poll(self):
+                return self.returncode
+
+            def communicate(self, timeout=None):
+                self.calls += 1
+                if self.calls == 1:
+                    cancel.set()
+                    raise subprocess.TimeoutExpired(["mineru"], timeout)
+                self.returncode = -15
+                return ("cancelled", None)
+
+        process = HangingProcess()
+        with tempfile.TemporaryDirectory(prefix="guzi-mineru-cancel-") as temp, patch(
+            "layout_pipeline.subprocess.Popen", return_value=process,
+        ) as popen, patch("layout_pipeline.os.killpg") as killpg:
+            root = Path(temp)
+            with self.assertRaises(LayoutPipelineCancelled):
+                _run_mineru(root / "mineru", root / "source.pdf", root / "output", cancel_event=cancel)
+            self.assertTrue(popen.call_args.kwargs["start_new_session"])
+            killpg.assert_called_once_with(process.pid, __import__("signal").SIGTERM)
+            self.assertEqual((root / "output/mineru.log").read_text(encoding="utf-8"), "cancelled")
+
+    def test_managed_mineru_uses_component_cwd_minimal_path_and_offline_caches(self) -> None:
+        class CompleteProcess:
+            pid = 43211
+            returncode = 0
+
+            def poll(self):
+                return self.returncode
+
+            def communicate(self, timeout=None):
+                return ("complete", None)
+
+        with tempfile.TemporaryDirectory(prefix="guzi-mineru-environment-") as temp, patch(
+            "layout_pipeline.subprocess.Popen", return_value=CompleteProcess(),
+        ) as popen:
+            root = Path(temp)
+            component = root / "components/mineru/test-1/darwin-arm64"
+            executable = component / "bin/mineru"
+            executable.parent.mkdir(parents=True)
+            executable.write_bytes(b"binary")
+            with self.assertRaisesRegex(LayoutPipelineError, "content_list_v2"):
+                _run_mineru(
+                    executable,
+                    root / "source.pdf",
+                    root / "output",
+                    runtime_root=component,
+                )
+            options = popen.call_args.kwargs
+            managed = component.resolve()
+            self.assertEqual(options["cwd"], str(managed))
+            self.assertEqual(options["env"]["PATH"], f"{managed}/bin:/usr/bin:/bin:/usr/sbin:/sbin")
+            self.assertEqual(options["env"]["HF_HUB_OFFLINE"], "1")
+            self.assertEqual(options["env"]["MY_SCHOLAR_MINERU_COMPONENT_ROOT"], str(managed))
+            self.assertNotIn("PYTHONPATH", options["env"])
+
     def test_layout_sidecar_is_bounded_before_ir_construction(self) -> None:
         with tempfile.TemporaryDirectory(prefix="my-scholar-sidecar-boundary-") as temp:
             root = Path(temp)

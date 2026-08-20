@@ -22,6 +22,17 @@ let browserSession;
   let maxConcurrentSettingsWrites = 0;
   let aiStatusHistory = [];
   let aiTestRequests = 0;
+  let parsingInstallPolls = 0;
+  let parsingProvider = {
+    id: 'local-mineru',
+    kind: 'local',
+    state: 'not_installed',
+    reason_code: 'not_installed',
+    ready: false,
+    can_install: true,
+    version: '2.1.0',
+    requirements: { min_os_version: '14', min_memory_bytes: 16 * 1024 ** 3, min_free_disk_bytes: 20 * 1024 ** 3 },
+  };
   let settingsAI = {
     translation: { base_url: '', model: '', api_key_configured: false },
     chat: { base_url: '', model: '', api_key_configured: false },
@@ -60,6 +71,34 @@ let browserSession;
       contentType: 'application/json',
       body: JSON.stringify(isWrite ? { settings } : settings),
     });
+  });
+  await page.route('**/api/parsing/providers', async (route) => {
+    if (parsingProvider.state === 'installing') {
+      parsingInstallPolls += 1;
+      if (parsingInstallPolls >= 2) {
+        parsingProvider = {
+          ...parsingProvider,
+          state: 'ready', reason_code: 'ready', ready: true, can_install: false,
+          installed_bytes: 18 * 1024 ** 3, progress: undefined, stage: undefined,
+        };
+      } else {
+        parsingProvider = { ...parsingProvider, state: 'installing', progress: 0.48, stage: '正在下载模型' };
+      }
+    }
+    await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ providers: [parsingProvider, { id: 'remote-guzi', kind: 'remote', state: 'disabled', reason_code: 'not_configured', ready: false }] }) });
+  });
+  await page.route('**/api/parsing/providers/local-mineru/install', async (route) => {
+    parsingInstallPolls = 0;
+    parsingProvider = { ...parsingProvider, state: 'installing', reason_code: 'installing', ready: false, can_install: false, progress: 0.17, stage: '正在下载运行组件' };
+    await route.fulfill({ status: 202, contentType: 'application/json', body: JSON.stringify({ provider: parsingProvider }) });
+  });
+  await page.route('**/api/parsing/providers/local-mineru/install/cancel', async (route) => {
+    parsingProvider = { ...parsingProvider, state: 'cancelled', reason_code: 'cancelled', ready: false, can_install: true, progress: 0.48, stage: '安装已取消' };
+    await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ provider: parsingProvider }) });
+  });
+  await page.route('**/api/parsing/providers/local-mineru/component', async (route) => {
+    parsingProvider = { ...parsingProvider, state: 'not_installed', reason_code: 'not_installed', ready: false, can_install: true, installed_bytes: undefined, progress: undefined, stage: undefined };
+    await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ provider: parsingProvider }) });
   });
   await page.route('**/api/ai/test', async (route) => {
     aiTestRequests += 1;
@@ -104,16 +143,32 @@ let browserSession;
       sectionGaps: sectionRects.slice(1).map((rect, index) => rect.top - sectionRects[index].bottom),
       sectionBorders: sections.map((section) => getComputedStyle(section).borderTopWidth),
       sectionRadii: sections.map((section) => Number.parseFloat(getComputedStyle(section).borderTopLeftRadius)),
-      allSectionsVisible: sections.every((section) => !section.hidden && getComputedStyle(section).display !== 'none' && section.getBoundingClientRect().height > 0),
+      visibleSectionIds: sections.filter((section) => !section.hidden && getComputedStyle(section).display !== 'none' && section.getBoundingClientRect().height > 0).map((section) => section.id),
       navigationCount: navigationLinks.length,
       navigationIcons: navigationLinks.map((link) => link.querySelectorAll('.settings-navigation-icon svg').length),
     };
   });
-  const expectedSettingsSections = ['settings-reading', 'settings-shortcuts', 'settings-metadata', 'settings-ai', 'settings-updates'];
-  const sectionsAreSerial = settingsStructure.sectionTops.every((top, index, tops) => index === 0 || top > tops[index - 1]);
-  const sectionsAreCards = settingsStructure.sectionGaps.every((gap) => gap >= 8) && settingsStructure.sectionBorders.every((width) => width !== '0px') && settingsStructure.sectionRadii.every((radius) => radius >= 10);
-  if (settingsStructure.formCount !== 1 || JSON.stringify(settingsStructure.sectionIds) !== JSON.stringify(expectedSettingsSections) || !settingsStructure.allSectionsVisible || !sectionsAreSerial || !sectionsAreCards) throw new Error(`Settings modules did not render as a serial card layout (${JSON.stringify(settingsStructure)})`);
+  const expectedSettingsSections = ['settings-reading', 'settings-shortcuts', 'settings-metadata', 'settings-parsing', 'settings-ai', 'settings-updates'];
+  const sectionsAreCards = settingsStructure.sectionBorders.every((width) => width !== '0px') && settingsStructure.sectionRadii.every((radius) => radius >= 10);
+  if (settingsStructure.formCount !== 1 || JSON.stringify(settingsStructure.sectionIds) !== JSON.stringify(expectedSettingsSections) || JSON.stringify(settingsStructure.visibleSectionIds) !== JSON.stringify(['settings-reading']) || !sectionsAreCards) throw new Error(`Settings modules did not render as single active card categories (${JSON.stringify(settingsStructure)})`);
   if (settingsStructure.navigationCount !== expectedSettingsSections.length || settingsStructure.navigationIcons.some((count) => count !== 1)) throw new Error(`Settings navigation did not render one SVG icon per module (${JSON.stringify(settingsStructure)})`);
+  await page.locator('.settings-navigation a[href="#settings-parsing"]').click();
+  await page.waitForFunction(() => document.querySelector('#local-mineru-status')?.textContent.trim() === '未安装');
+  if (await page.locator('#remote-parsing-provider button').count()) throw new Error('The unavailable remote parsing provider exposed an action');
+  if (!/不会上传 PDF/u.test(await page.locator('#remote-parsing-provider').textContent())) throw new Error('The remote parsing placeholder did not preserve the no-upload boundary');
+  await page.locator('#install-local-mineru').click();
+  await page.locator('#confirm-dialog[open]').waitFor();
+  if (!/macOS 14\+.*16\.00 GB 内存.*20\.00 GB 可用空间/u.test(await page.locator('#confirm-message').textContent())) throw new Error('The component confirmation omitted system requirements');
+  await page.locator('#confirm-accept').click();
+  await page.locator('#local-mineru-install-progress:not([hidden])').waitFor();
+  if (await page.locator('#local-mineru-install-value').textContent() !== '17%') throw new Error('The component UI did not render backend download progress');
+  await page.locator('#cancel-local-mineru-install').click();
+  await page.waitForFunction(() => document.querySelector('#local-mineru-status')?.textContent.trim() === '已取消');
+  if (await page.locator('#remove-local-mineru').isVisible()) throw new Error('A cancelled component install was shown as installed');
+  await page.locator('#install-local-mineru').click();
+  await page.locator('#confirm-accept').click();
+  await page.waitForFunction(() => document.querySelector('#local-mineru-status')?.textContent.trim() === '可以使用');
+  if (await page.locator('#local-mineru-version').textContent() !== 'v2.1.0' || await page.locator('#local-mineru-disk').textContent() !== '18.00 GB') throw new Error('Installed component metadata did not render');
   const settingsLayoutAt = async (width) => {
     await page.setViewportSize({ width, height: 980 });
     await page.waitForTimeout(80);
@@ -130,14 +185,12 @@ let browserSession;
   if (Math.abs(settingsMedium.navigation.width - 210) > 2 || Math.abs(settingsMedium.form.left - settingsMedium.navigation.right - 16) > 2) throw new Error(`Medium settings layout did not use the compact grid (${JSON.stringify(settingsMedium)})`);
   if (settingsNarrow.form.top < settingsNarrow.navigation.bottom || settingsNarrow.scrollWidth > settingsNarrow.viewport + 1) throw new Error(`Narrow settings layout stacked or overflowed incorrectly (${JSON.stringify(settingsNarrow)})`);
   await page.setViewportSize({ width: 1500, height: 980 });
-  const settingsScrollBeforeNavigation = await page.evaluate(() => window.scrollY);
   await page.locator('.settings-navigation a[href="#settings-shortcuts"]').click();
-  await page.waitForFunction((before) => {
+  await page.waitForFunction(() => {
     const section = document.querySelector('#settings-shortcuts');
-    const top = section?.getBoundingClientRect().top ?? Infinity;
     const link = document.querySelector('.settings-navigation a[href="#settings-shortcuts"]');
-    return window.scrollY > before + 20 && top >= 55 && top <= 140 && link?.getAttribute('aria-current') === 'location' && document.querySelectorAll('.settings-navigation a[aria-current]').length === 1;
-  }, settingsScrollBeforeNavigation);
+    return section && !section.hidden && link?.getAttribute('aria-current') === 'location' && document.querySelectorAll('.settings-navigation a[aria-current]').length === 1;
+  });
   if (await page.locator('.settings-navigation a[href="#settings-shortcuts"]').getAttribute('aria-current') !== 'location' || await page.locator('.settings-navigation a[aria-current]').count() !== 1) throw new Error('Settings navigation did not expose the current section');
   const shortcutSave = page.waitForResponse((response) => {
     if (!response.url().endsWith('/api/settings') || response.request().method() !== 'POST' || !response.ok()) return false;
@@ -172,8 +225,7 @@ let browserSession;
   await page.locator('.settings-navigation a[href="#settings-reading"]').click();
   await page.waitForFunction(() => {
     const section = document.querySelector('#settings-reading');
-    const top = section?.getBoundingClientRect().top ?? Infinity;
-    return top >= 55 && top <= 165;
+    return section && !section.hidden && document.querySelector('.settings-navigation a[href="#settings-reading"]')?.getAttribute('aria-current') === 'location';
   });
   await page.waitForFunction(() => document.querySelector('#setting-app-font')?.value === 'system' && document.querySelector('#setting-reader-font')?.value === 'academic' && document.querySelector('input[name="setting-accent"][value="amber"]')?.checked);
   const finalAppearanceSave = page.waitForResponse((response) => {
@@ -210,7 +262,9 @@ let browserSession;
   });
   if (!libraryLocationFallback.buttonDisabled || !/浏览器服务/u.test(libraryLocationFallback.path || '') || !/桌面客户端/u.test(libraryLocationFallback.status || '')) throw new Error(`Browser settings did not expose the desktop-only library location fallback (${JSON.stringify(libraryLocationFallback)})`);
   const aiSourceText = await page.locator('#settings-updates').textContent();
-  if (!/谷子学术|Guzi Scholar/u.test(aiSourceText) || !/github\.com\/ShiLong-CN\/guzi-scholar/u.test(aiSourceText)) throw new Error('Open-source attribution was missing from the settings page');
+  const sourceHref = await page.locator('#settings-updates a[href*="github.com/ShiLong-CN/guzi-scholar"]').getAttribute('href');
+  if (!/谷子学术|Guzi Scholar/u.test(aiSourceText) || !sourceHref) throw new Error('Open-source attribution was missing from the settings page');
+  await page.locator('.settings-navigation a[href="#settings-ai"]').click();
   const translationBaseURL = page.locator('#setting-translation-base-url');
   const translationKey = page.locator('#setting-translation-api-key');
   const translationModel = page.locator('#setting-translation-model');
@@ -243,7 +297,7 @@ let browserSession;
   await page.waitForFunction(() => document.querySelector('#settings-save-status')?.dataset.state === 'saved');
   if (settingsAI.translation.api_key_configured) throw new Error('Clearing the translation API key did not update persisted state');
 
-  if (await page.locator('#ai-status-overview-title').textContent() !== '尚未检测' || await page.locator('.ai-service-status.is-unknown').count() !== 2 || await page.locator('#ai-status-history-list .ai-status-history-empty').count() !== 1) throw new Error('Configured AI services were presented as checked before a real connection test');
+  if (await page.locator('#ai-status-overview-title').textContent() !== '尚未检测' || await page.locator('#settings-ai .ai-service-status.is-unknown').count() !== 2 || await page.locator('#ai-status-history-list .ai-status-history-empty').count() !== 1) throw new Error('Configured AI services were presented as checked before a real connection test');
   const writesBeforeTest = settingsWrites.length;
   await page.locator('#test-ai-button').click();
   await page.locator('#ai-status-overview.is-operational #ai-status-overview-title').filter({ hasText: 'AI 服务运行正常' }).waitFor();

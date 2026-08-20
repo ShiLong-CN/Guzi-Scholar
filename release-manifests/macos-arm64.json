@@ -2,7 +2,7 @@
   "schema": 1,
   "platform": "darwin",
   "arch": "arm64",
-  "channel": "stable",
+  "channel": "internal",
   "version": "0.1.0",
   "download_url": "https://github.com/ShiLong-CN/guzi-scholar/releases/download/v0.1.0/Guzi-Scholar-0.1.0-arm64-internal.dmg",
   "sha256": "19bbe395075f463a200ef0f46d4a6c9d32a46ec54bcd6d79dda3f585c7bee2e2",

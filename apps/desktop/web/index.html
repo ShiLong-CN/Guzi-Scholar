@@ -157,6 +157,7 @@
           </div>
           <div id="reflow-progress-track" class="translation-progress-track" role="progressbar" aria-label="AI 重排进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="reflow-progress-bar" class="translation-progress-bar"></div></div>
         </div>
+        <button id="cancel-reflow-button" class="tiny-button" type="button">取消</button>
       </div>
       <div class="reader-grid">
         <aside id="reader-sidebar" class="reader-sidebar" aria-label="阅读助手" aria-hidden="true">
@@ -256,6 +257,7 @@
             <a class="active" href="#settings-reading" aria-current="location"><span class="settings-navigation-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.5"></circle><path d="M12 2.5v2M12 19.5v2M4.5 12h-2M21.5 12h-2M5.3 5.3l1.4 1.4M17.3 17.3l1.4 1.4M18.7 5.3l-1.4 1.4M6.7 17.3l-1.4 1.4"></path></svg></span><span>外观与阅读</span></a>
             <a href="#settings-shortcuts"><span class="settings-navigation-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="3"></rect><path d="M7 9h.01M11 9h.01M15 9h.01M18 9h.01M7 13h.01M11 13h.01M15 13h3M7 16h10"></path></svg></span><span>快捷键</span></a>
             <a href="#settings-metadata"><span class="settings-navigation-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H11a3 3 0 0 1 3 3v15a3 3 0 0 0-3-3H6.5A2.5 2.5 0 0 0 4 20.5z"></path><path d="M20 5.5A2.5 2.5 0 0 0 17.5 3H14v18a3 3 0 0 1 3-3h.5a2.5 2.5 0 0 1 2.5 2.5z"></path></svg></span><span>文献管理</span></a>
+            <a href="#settings-parsing"><span class="settings-navigation-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="3"></rect><path d="M9 9h6v6H9zM9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"></path></svg></span><span>版面引擎</span></a>
             <a href="#settings-ai"><span class="settings-navigation-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m12 3 1.4 4.1a5.2 5.2 0 0 0 3.5 3.5L21 12l-4.1 1.4a5.2 5.2 0 0 0-3.5 3.5L12 21l-1.4-4.1a5.2 5.2 0 0 0-3.5-3.5L3 12l4.1-1.4a5.2 5.2 0 0 0 3.5-3.5z"></path></svg></span><span>AI 服务</span></a>
             <a href="#settings-updates"><span class="settings-navigation-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"></circle><path d="M12 11v5M12 8h.01"></path></svg></span><span>关于与更新</span></a>
           </nav>
@@ -293,6 +295,33 @@
             <label class="settings-toggle"><span><strong>自动检索元数据</strong><small>导入后自动读取标题、作者、期刊和 DOI。</small></span><input id="setting-metadata-auto" type="checkbox" checked></label>
             <label class="settings-toggle"><span><strong>允许在线匹配</strong><small>使用 DOI、arXiv、PubMed 和 Crossref 公共服务。</small></span><input id="setting-metadata-online" type="checkbox" checked></label>
             <label class="settings-field">Crossref 联系邮箱（可选）<input id="setting-metadata-email" type="email" placeholder="用于礼貌请求与限流识别"></label>
+          </section>
+          <section id="settings-parsing" class="settings-section" hidden>
+            <div class="settings-section-heading"><div><h2>版面引擎</h2><p>管理高级 AI 重排所需的解析组件。基础导入与阅读仍使用内置转换器。</p></div><span class="settings-badge">按需安装</span></div>
+            <div class="parsing-provider-grid">
+              <article id="local-mineru-provider" class="parsing-provider-card is-loading" aria-labelledby="local-mineru-title">
+                <div class="parsing-provider-heading"><span class="ai-service-icon" aria-hidden="true">版</span><div><h3 id="local-mineru-title">本地 MinerU</h3><p>高级 AI 重排 · 文献不会离开当前设备</p></div><span id="local-mineru-status" class="ai-service-status is-unknown">正在检测</span></div>
+                <dl class="parsing-provider-facts">
+                  <div><dt>组件版本</dt><dd id="local-mineru-version">—</dd></div>
+                  <div><dt>磁盘占用</dt><dd id="local-mineru-disk">—</dd></div>
+                  <div><dt>系统要求</dt><dd id="local-mineru-requirements">macOS 14+ · 16 GB 内存</dd></div>
+                </dl>
+                <div id="local-mineru-install-progress" class="component-progress" role="status" aria-live="polite" hidden>
+                  <div><strong id="local-mineru-install-stage">正在准备安装</strong><span id="local-mineru-install-value">0%</span></div>
+                  <div class="translation-progress-track" role="progressbar" aria-label="版面引擎安装进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="local-mineru-install-bar" class="translation-progress-bar"></div></div>
+                </div>
+                <p id="local-mineru-detail" class="parsing-provider-detail" role="status" aria-live="polite">正在检查本机组件状态。</p>
+                <div class="parsing-provider-actions">
+                  <button id="install-local-mineru" class="primary-button compact-button" type="button" hidden>一键安装版面引擎</button>
+                  <button id="cancel-local-mineru-install" class="secondary-button compact-button" type="button" hidden>取消安装</button>
+                  <button id="remove-local-mineru" class="secondary-button compact-button danger-button" type="button" hidden>删除组件</button>
+                </div>
+              </article>
+              <article id="remote-parsing-provider" class="parsing-provider-card is-disabled" aria-labelledby="remote-parsing-title">
+                <div class="parsing-provider-heading"><span class="ai-service-icon" aria-hidden="true">云</span><div><h3 id="remote-parsing-title">谷子在线解析服务</h3><p>未来可在相同解析接口中使用</p></div><span class="ai-service-status is-unknown">尚未提供</span></div>
+                <p class="parsing-provider-detail">当前版本不会上传 PDF，也没有配置在线服务地址。</p>
+              </article>
+            </div>
           </section>
           <section id="settings-ai" class="settings-section" hidden>
             <div class="settings-section-heading"><div><h2>AI 服务</h2><p>填写你自己的 OpenAI-compatible 服务地址、密钥和模型；配置只保存在当前设备。</p></div><span class="settings-badge">本机配置</span></div>

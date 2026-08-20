@@ -23,7 +23,7 @@ const { checkForUpdate } = require('./update-service.cjs');
 const { consumeInstallationMarker, requestMacInstallation } = require('./macos-installation.cjs');
 
 const PRODUCT_NAME = '谷子学术';
-const UPDATE_CHANNEL = 'stable';
+const UPDATE_CHANNEL = 'internal';
 const UPDATE_MANIFEST_URL = process.env.MY_SCHOLAR_UPDATE_MANIFEST_URL || 'https://raw.githubusercontent.com/ShiLong-CN/guzi-scholar/main/release-manifests/macos-arm64.json';
 const UPDATE_ALLOWED_ORIGINS = Object.freeze(['https://raw.githubusercontent.com', 'https://github.com']);
 const defaultUserDataPath = app.getPath('userData');
@@ -617,6 +617,7 @@ async function startServer() {
       MY_SCHOLAR_PROJECT_ROOT: projectRoot,
       MY_SCHOLAR_DATA_DIR: storage.stateDir,
       MY_SCHOLAR_LIBRARY_DIR: storage.currentPath,
+      MY_SCHOLAR_COMPONENTS_DIR: path.join(app.getPath('userData'), 'components'),
       MY_SCHOLAR_MIGRATION_TOKEN: migrationControlToken,
       MY_SCHOLAR_API_TOKEN: apiAccessToken,
       MY_SCHOLAR_BACKEND: process.env.MY_SCHOLAR_BACKEND || 'auto',

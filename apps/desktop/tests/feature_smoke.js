@@ -1387,6 +1387,9 @@ let browserSession;
   await page.evaluate(async ({ id, markdown }) => fetch(`/api/jobs/${id}/notes`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ markdown }) }), { id: jobId, markdown: originalArticleNotes });
 
   let reflowPollCount = 0;
+  let reflowPostCount = 0;
+  let reflowCancelCount = 0;
+  let parsingCapability = 'artifact_unavailable';
   const reflowDocumentURL = `/api/jobs/${jobId}/renders/2/document.html`;
   const sourceDocumentHTML = await page.evaluate(async (id) => (await fetch(`/api/jobs/${id}/document.html`)).text(), jobId);
   await page.route(`**/api/jobs/${jobId}/renders/2/assets/images/**`, async (route) => {
@@ -1404,11 +1407,26 @@ let browserSession;
     await route.fulfill({ response });
   });
   await page.route(`**/api/jobs/${jobId}/renders/2/document.html*`, async (route) => route.fulfill({ status: 200, contentType: 'text/html', body: sourceDocumentHTML }));
-  await page.route(`**/api/jobs/${jobId}/reflow`, async (route) => route.fulfill({
-    status: 202,
+  await page.route('**/api/parsing/providers', async (route) => route.fulfill({
     contentType: 'application/json',
-    body: JSON.stringify({ job_id: jobId, status: 'completed', reflow: { status: 'queued', stage: '等待后台执行', progress: 0, generation: 2, error: null, document_url: null } }),
+    body: JSON.stringify({ providers: [{ id: 'local-mineru', kind: 'local', state: parsingCapability, reason_code: parsingCapability, ready: parsingCapability === 'ready', can_install: false, version: parsingCapability === 'ready' ? '2.1.0' : 'unpublished', message: parsingCapability === 'artifact_unavailable' ? '测试环境没有组件包' : '' }] }),
   }));
+  await page.route(`**/api/jobs/${jobId}/reflow`, async (route) => {
+    if (route.request().method() === 'DELETE') {
+      reflowCancelCount += 1;
+      await route.fulfill({
+        contentType: 'application/json',
+        body: JSON.stringify({ job_id: jobId, status: 'completed', reflow: { status: 'cancelled', stage: '已停止版面解析', progress: 1, generation: 2, error: null, document_url: null } }),
+      });
+      return;
+    }
+    reflowPostCount += 1;
+    await route.fulfill({
+      status: 202,
+      contentType: 'application/json',
+      body: JSON.stringify({ job_id: jobId, status: 'completed', reflow: { status: 'queued', stage: '等待后台执行', progress: 0, generation: 2, error: null, document_url: null } }),
+    });
+  });
   await page.route(new RegExp(`/api/jobs/${jobId}$`), async (route) => {
     reflowPollCount += 1;
     await new Promise((resolve) => setTimeout(resolve, 350));
@@ -1420,18 +1438,32 @@ let browserSession;
   });
   const originalFrameSource = await page.locator('#html-preview').getAttribute('src');
   await page.locator('#reflow-button').click();
+  await page.locator('#reflow-progress[data-state="failed"]').waitFor();
+  if (reflowPostCount !== 0 || await page.locator('#reflow-progress-value').textContent() !== '0%') throw new Error('Unavailable layout capability still submitted reflow or displayed terminal 100%');
+  if (!/尚未提供/u.test(await page.locator('#reflow-progress-stage').textContent())) throw new Error('Artifact-unavailable preflight did not show an actionable message');
+  parsingCapability = 'ready';
+  await page.locator('#reflow-button').click();
   await page.locator('#confirm-dialog[open]').waitFor();
-  const reflowPost = page.waitForResponse((response) => response.request().method() === 'POST' && response.url().endsWith(`/api/jobs/${jobId}/reflow`));
+  let reflowPost = page.waitForResponse((response) => response.request().method() === 'POST' && response.url().endsWith(`/api/jobs/${jobId}/reflow`));
   await page.locator('#confirm-accept').click();
   await reflowPost;
   await page.locator('#reflow-progress:not([hidden])').waitFor();
   if (await page.locator('#html-preview').getAttribute('src') !== originalFrameSource) throw new Error('AI reflow replaced the current iframe before the new generation completed');
+  await page.locator('#cancel-reflow-button').click();
+  await page.locator('#reflow-progress[data-state="cancelled"]').waitFor();
+  if (reflowCancelCount !== 1 || await page.locator('#reflow-progress-value').textContent() === '100%') throw new Error('Cancelled reflow did not reach a truthful terminal state');
+  if (await page.locator('#html-preview').getAttribute('src') !== originalFrameSource) throw new Error('Cancelled reflow replaced the current iframe');
+  await page.locator('#reflow-button').click();
+  await page.locator('#confirm-dialog[open]').waitFor();
+  reflowPost = page.waitForResponse((response) => response.request().method() === 'POST' && response.url().endsWith(`/api/jobs/${jobId}/reflow`));
+  await page.locator('#confirm-accept').click();
+  await reflowPost;
   await page.locator('#reflow-progress[data-state="completed"]').waitFor();
   await page.waitForFunction(({ id, generation }) => {
     const src = document.querySelector('#html-preview')?.src || '';
     return src.includes(`/api/jobs/${id}/renders/${generation}/document.html`) && src.includes('reader=1');
   }, { id: jobId, generation: 2 });
-  if (reflowPollCount < 1) throw new Error('AI reflow did not poll the public job status');
+  if (reflowPostCount !== 2 || reflowPollCount < 1) throw new Error('AI reflow did not preserve preflight and polling boundaries');
 
   console.log(JSON.stringify({ underline: true, inlineNoteAdd: true, inlineNoteEdit: true, inlineRichText: true, inlineNoteFormats: true, inlineNoteClipboardImage: true, articleNoteUnifiedEditor: true, articleNoteClipboardImage: true, articleNoteReload: true, articleNoteDocumentIsolation: true, articleNoteFailedDraftRecovery: true, articleNoteIndependentLoads: true, articleNoteUploadSessionIsolation: true, readerTypographySurfaces: true, selectionTranslationRequestCount, chatEnterSends: true, chatCommandEnterLineBreak: true, chatHistorySubview: true, chatPartialCopy: true, mediaFigureDragResize: true, mediaTableResize: true, mediaResizeKeyboard: true, mediaResizeReset: true, mediaResizePersistence: true, quickPreviewStructuredCaption: true, quickPreviewCachedTranslation: true, reflowGenerationReload: true, imageLightbox: true, imageBackdropClose: true, imageEscapeClose: true, imageContextMenu: true, imageClipboard: true, imageChatContext: true, aiSuggestionStyle: true, aiSuggestionSelection: true, aiSuggestionKeyboardDialog: true, aiSuggestionDirectNote: true, aiSuggestionAdopt: true, aiSuggestionIgnore: true, aiSuggestionIgnoreFocus: true, aiSuggestionIgnorePersists: true, noStackedHighlights: true, clearAllAnnotations: true, clearAllConfirmation: true, preservesAIHighlights: true, editHidesSourceQuote: true, selectAll: true, annotationPalette: true, perAnnotationColor: true, sidebarAnnotationColor: true, inlineNoteFollowsText: true, isolatedPopover: true, selectionInReadingArea: true, selectionPlacement, chatContextExplicit: true, translatedSelectionAnnotation: true, autoHighlights: true, separatedHighlightPanels: true, categoryColors: true, errors }));
   if (errors.length) process.exitCode = 1;

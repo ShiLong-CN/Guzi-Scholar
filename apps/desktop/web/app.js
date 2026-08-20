@@ -354,7 +354,14 @@
   const api = async (url, options = {}) => {
     const response = await fetch(url, options);
     const payload = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(payload.error || `请求失败（${response.status}）`);
+    if (!response.ok) {
+      const errorBody = payload?.error && typeof payload.error === 'object' ? payload.error : {};
+      const error = new Error(String(errorBody.message || payload.error || payload.message || `请求失败（${response.status}）`));
+      error.code = String(payload.code || errorBody.code || 'http_error');
+      error.details = payload.details || errorBody.details || {};
+      error.status = response.status;
+      throw error;
+    }
     return payload;
   };
   const jsonOptions = (body, method = 'POST') => ({ method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
@@ -9195,9 +9202,298 @@
     });
   });
 
+  const parsingInstallStates = new Set(['preparing', 'checking', 'downloading', 'verifying', 'publishing', 'installing', 'cancelling']);
+  let currentLocalMinerUProvider = null;
+  let parsingProvidersRequest = 0;
+  let parsingInstallPromise = null;
+
+  function parsingProviderRecords(payload = {}) {
+    if (Array.isArray(payload.providers)) return payload.providers;
+    if (payload.providers && typeof payload.providers === 'object') {
+      return Object.entries(payload.providers).map(([id, provider]) => (
+        provider && typeof provider === 'object' ? { id, ...provider } : { id, status: provider }
+      ));
+    }
+    if (payload.provider && typeof payload.provider === 'object') return [payload.provider];
+    return payload && typeof payload === 'object' && (payload.id || payload.status || payload.capability)
+      ? [payload]
+      : [];
+  }
+
+  function localMinerUFromPayload(payload = {}) {
+    const providers = parsingProviderRecords(payload);
+    return providers.find((provider) => {
+      const id = String(provider.id || provider.provider_id || provider.name || '').toLowerCase();
+      return id === 'local-mineru' || id === 'mineru' || id.includes('mineru');
+    }) || providers.find((provider) => String(provider.type || provider.kind || '').toLowerCase() === 'local') || null;
+  }
+
+  function parsingInstallation(provider = {}) {
+    const component = provider.component && typeof provider.component === 'object' ? provider.component : {};
+    return provider.install && typeof provider.install === 'object'
+      ? provider.install
+      : provider.installation && typeof provider.installation === 'object'
+        ? provider.installation
+        : component.install && typeof component.install === 'object' ? component.install : provider;
+  }
+
+  function parsingProviderStatus(provider = {}) {
+    const capability = provider.capability;
+    const component = provider.component && typeof provider.component === 'object' ? provider.component : {};
+    const raw = capability && typeof capability === 'object'
+      ? capability.status || capability.code || capability.reason
+      : capability;
+    let status = String(raw || provider.status || provider.state || component.status || '').trim().toLowerCase().replaceAll('-', '_');
+    if (!status && (capability?.ready === true || capability?.available === true || provider.ready === true)) status = 'ready';
+    if (!status && component.installed === true) status = 'ready';
+    if (!status && provider.enabled === false) status = 'disabled';
+    const aliases = {
+      available: 'ready', healthy: 'ready', ok: 'ready', installed: 'ready',
+      missing: 'not_installed', unsupported: 'unsupported_platform', checksum_failed: 'checksum_mismatch',
+    };
+    return aliases[status] || status || 'unknown';
+  }
+
+  function parsingInstallStatus(provider = {}) {
+    const installation = parsingInstallation(provider);
+    return String(installation.status || installation.state || '').trim().toLowerCase().replaceAll('-', '_');
+  }
+
+  function parsingRequirements(provider = {}) {
+    const capability = provider.capability && typeof provider.capability === 'object' ? provider.capability : {};
+    return provider.requirements || capability.requirements || provider.component?.requirements || {};
+  }
+
+  function parsingDetails(provider = {}) {
+    const capability = provider.capability && typeof provider.capability === 'object' ? provider.capability : {};
+    return provider.details || capability.details || parsingInstallation(provider).details || {};
+  }
+
+  function parsingErrorCode(provider = {}) {
+    const installation = parsingInstallation(provider);
+    return String(installation.code || installation.error_code || installation.reason_code || provider.reason_code || parsingProviderStatus(provider) || 'unknown').replaceAll('-', '_');
+  }
+
+  function requirementText(provider = {}) {
+    const requirements = parsingRequirements(provider);
+    const minimumOS = requirements.min_macos || requirements.minimum_macos || requirements.min_os_version || requirements.min_os || '14';
+    const memory = Number(requirements.min_memory_bytes || requirements.minimum_memory_bytes || 16 * 1024 ** 3);
+    const disk = Number(requirements.required_disk_bytes || requirements.min_free_disk_bytes || requirements.min_disk_bytes || 0);
+    return [`macOS ${minimumOS}+`, `${formatBytes(memory)} 内存`, disk > 0 ? `${formatBytes(disk)} 可用空间` : '约 20 GB 可用空间'].join(' · ');
+  }
+
+  function actionableParsingMessage(code, details = {}, fallback = '') {
+    const messages = {
+      not_installed: 'AI 重排需要本地版面引擎。确认系统要求后可一键安装。',
+      artifact_unavailable: '当前版本尚未提供适用于此设备的安装包，请等待后续版本。',
+      unsupported_platform: '本地版面引擎首期仅支持 macOS Apple Silicon。',
+      unsupported_arch: '本地版面引擎首期仅支持 Apple Silicon Mac。',
+      unsupported_os: `系统版本不兼容，需要 macOS ${details.min_macos || details.minimum_macos || '14'} 或更高版本。`,
+      incompatible_os: `系统版本不兼容，需要 macOS ${details.required || details.min_os_version || '14'} 或更高版本。`,
+      insufficient_memory: `可用内存不足，需要至少 ${formatBytes(details.required_bytes || details.min_memory_bytes || 16 * 1024 ** 3)} 内存。`,
+      insufficient_disk: `磁盘空间不足，需要至少 ${formatBytes(details.required_bytes || details.required_disk_bytes || 20 * 1024 ** 3)} 可用空间。`,
+      network_error: '下载失败，请检查网络连接后重试。已下载的临时文件不会作为可用组件执行。',
+      download_failed: '下载失败，请检查网络连接后重试。已下载的临时文件不会作为可用组件执行。',
+      size_mismatch: '组件下载不完整，临时文件已清理，请重新下载。',
+      checksum_mismatch: '组件校验失败，未安装任何未校验内容。请重新下载。',
+      corrupt: '本地组件不完整或已损坏，请删除后重新安装。',
+      component_unhealthy: '本地组件未通过运行检查，请删除后重新安装。',
+      install_conflict: '组件目录存在未通过校验的内容，请先删除组件再重新安装。',
+      remove_failed: '组件卸载失败，受管组件仍保留在原位置，请稍后重试。',
+      remove_cleanup_failed: '组件已停止使用，但旧版本临时文件清理失败；谷子学术会在下次检测时重试。',
+      cancelled: '安装已取消，临时文件将被清理。',
+      disabled: '本地版面引擎已停用，AI 重排当前不可用。',
+      not_configured: '解析服务尚未配置。',
+    };
+    return messages[code] || fallback || '版面引擎暂不可用，请稍后重试。';
+  }
+
+  function renderLocalMinerUProvider(provider = {}, explicitError = null) {
+    currentLocalMinerUProvider = provider;
+    const card = $('#local-mineru-provider');
+    if (!card) return provider;
+    const component = provider.component && typeof provider.component === 'object' ? provider.component : {};
+    const installation = parsingInstallation(provider);
+    const installStatus = parsingInstallStatus(provider);
+    const status = explicitError ? 'failed' : (parsingInstallStates.has(installStatus) ? installStatus : parsingProviderStatus(provider));
+    const busy = parsingInstallStates.has(status);
+    const installed = component.installed === true || provider.installed === true || ['ready', 'update_available', 'corrupt'].includes(parsingProviderStatus(provider));
+    const hasUpdate = provider.update_available === true || component.update_available === true || parsingProviderStatus(provider) === 'update_available';
+    const statusLabels = {
+      ready: '可以使用', update_available: '可更新', not_installed: '未安装', artifact_unavailable: '暂无安装包',
+      unsupported_platform: '不兼容', unsupported_arch: '不兼容', unsupported_os: '不兼容', insufficient_memory: '资源不足',
+      insufficient_disk: '空间不足', corrupt: '需要修复', failed: '安装失败', cancelled: '已取消', disabled: '已停用',
+      preparing: '准备中', checking: '检测中', downloading: '下载中', verifying: '校验中', publishing: '安装中',
+      installing: '安装中', cancelling: '正在取消', unknown: '状态未知',
+    };
+    const label = statusLabels[status] || '暂不可用';
+    const statusNode = $('#local-mineru-status');
+    if (statusNode) {
+      statusNode.textContent = label;
+      statusNode.className = `ai-service-status ${status === 'ready' ? 'is-ready' : busy ? 'is-loading' : ['not_installed', 'unknown', 'cancelled'].includes(status) ? 'is-unknown' : 'is-unavailable'}`;
+    }
+    card.classList.remove('is-loading', 'is-ready', 'is-installing', 'is-error', 'is-disabled', 'is-idle');
+    card.classList.add(status === 'ready' ? 'is-ready' : busy ? 'is-installing' : ['failed', 'corrupt', 'checksum_mismatch'].includes(status) ? 'is-error' : status === 'disabled' ? 'is-disabled' : 'is-idle');
+
+    const declaredVersion = String(provider.version || '');
+    const installedVersion = component.version || provider.installed_version || (installed ? declaredVersion : '');
+    const targetVersion = provider.latest_version || provider.target_version || provider.artifact?.version || (!installed ? declaredVersion : '');
+    $('#local-mineru-version').textContent = installedVersion
+      ? `v${installedVersion}${hasUpdate && targetVersion ? ` → v${targetVersion}` : ''}`
+      : targetVersion && targetVersion !== 'unpublished' ? `待安装 v${targetVersion}` : targetVersion === 'unpublished' ? '尚未发布' : '未安装';
+    const diskBytes = Number(component.disk_bytes || component.size_bytes || provider.installed_bytes || provider.disk_bytes || provider.disk_usage_bytes || 0);
+    const downloadBytes = Number(provider.artifact?.size_bytes || provider.download_bytes || provider.size_bytes || 0);
+    $('#local-mineru-disk').textContent = diskBytes > 0 ? formatBytes(diskBytes) : downloadBytes > 0 ? `预计 ${formatBytes(downloadBytes)}` : '—';
+    $('#local-mineru-requirements').textContent = requirementText(provider);
+
+    const progress = $('#local-mineru-install-progress');
+    const rawProgress = Number(installation.progress ?? provider.progress ?? provider.install_progress ?? 0);
+    const percent = Math.round(Math.max(0, Math.min(100, Number.isFinite(rawProgress) ? (rawProgress <= 1 ? rawProgress * 100 : rawProgress) : 0)));
+    progress.hidden = !busy;
+    $('#local-mineru-install-stage').textContent = String(installation.stage || installation.message || statusLabels[status] || '正在安装').slice(0, 160);
+    $('#local-mineru-install-value').textContent = `${percent}%`;
+    $('#local-mineru-install-bar').style.width = `${percent}%`;
+    progress.querySelector('[role="progressbar"]')?.setAttribute('aria-valuenow', String(percent));
+
+    const fallback = String(explicitError?.message || installation.error || provider.message || provider.capability?.message || '').slice(0, 300);
+    const detailCode = explicitError?.code || parsingErrorCode(provider);
+    const cleanupWarning = provider.cleanup_pending
+      ? ` 旧版本临时文件仍占用 ${formatBytes(provider.cleanup_pending_bytes || 0)}，谷子学术将在后续检测时重试清理。`
+      : '';
+    $('#local-mineru-detail').textContent = status === 'ready'
+      ? `本地版面引擎${installedVersion ? ` v${installedVersion}` : ''} 已通过能力检测，可用于 AI 重排。${cleanupWarning}`
+      : busy ? String(installation.stage || installation.message || '正在准备组件，请保持应用打开。')
+        : actionableParsingMessage(detailCode, explicitError?.details || parsingDetails(provider), fallback);
+
+    const installButton = $('#install-local-mineru');
+    const cancelButton = $('#cancel-local-mineru-install');
+    const removeButton = $('#remove-local-mineru');
+    const retryable = ['failed', 'cancelled'].includes(status);
+    const blocked = new Set(['artifact_unavailable', 'unsupported_platform', 'unsupported_arch', 'unsupported_os', 'incompatible_os', 'insufficient_memory', 'insufficient_disk', 'disabled']);
+    const installable = provider.installable !== false && (provider.can_install !== false || retryable) && !blocked.has(parsingProviderStatus(provider)) && !blocked.has(parsingErrorCode(provider));
+    installButton.hidden = busy || (!installable && !hasUpdate) || (status === 'ready' && !hasUpdate);
+    installButton.disabled = busy;
+    installButton.textContent = hasUpdate ? '更新版面引擎' : ['failed', 'cancelled', 'corrupt'].includes(status) ? '重新安装' : '一键安装版面引擎';
+    cancelButton.hidden = !busy;
+    cancelButton.disabled = status === 'cancelling';
+    removeButton.hidden = busy || !installed;
+    removeButton.disabled = busy;
+    return provider;
+  }
+
+  async function fetchParsingProviders({ render = true } = {}) {
+    const payload = await api('/api/parsing/providers');
+    const provider = localMinerUFromPayload(payload) || { id: 'local-mineru', status: 'artifact_unavailable' };
+    if (render) renderLocalMinerUProvider(provider);
+    return provider;
+  }
+
+  async function monitorParsingInstall() {
+    let failures = 0;
+    while (true) {
+      await new Promise((resolve) => window.setTimeout(resolve, 700));
+      try {
+        const provider = await fetchParsingProviders();
+        failures = 0;
+        if (!parsingInstallStates.has(parsingInstallStatus(provider))) return provider;
+      } catch (error) {
+        failures += 1;
+        if (failures >= 3) {
+          renderLocalMinerUProvider(currentLocalMinerUProvider || { status: 'failed' }, error);
+          throw error;
+        }
+      }
+    }
+  }
+
+  async function loadParsingProviders() {
+    const request = ++parsingProvidersRequest;
+    try {
+      const provider = await fetchParsingProviders({ render: false });
+      if (request !== parsingProvidersRequest) return provider;
+      renderLocalMinerUProvider(provider);
+      if (parsingInstallStates.has(parsingInstallStatus(provider)) && !parsingInstallPromise) {
+        parsingInstallPromise = monitorParsingInstall().finally(() => { parsingInstallPromise = null; });
+        void parsingInstallPromise.catch(() => {});
+      }
+      return provider;
+    } catch (error) {
+      if (request === parsingProvidersRequest) renderLocalMinerUProvider(currentLocalMinerUProvider || { status: 'failed' }, error);
+      return null;
+    }
+  }
+
+  function parsingInstallPrompt(provider = {}) {
+    const artifactBytes = Number(provider.artifact?.size_bytes || provider.download_bytes || provider.size_bytes || 0);
+    const requirements = requirementText(provider);
+    return `版面引擎仅用于高级 AI 重排，文献不会上传。${artifactBytes > 0 ? `需要下载约 ${formatBytes(artifactBytes)}。` : ''}系统要求：${requirements}。确认后开始下载吗？`;
+  }
+
+  async function installLocalMinerU(provider = currentLocalMinerUProvider, { skipConfirmation = false } = {}) {
+    if (parsingInstallPromise) return parsingInstallPromise;
+    const selected = provider || await fetchParsingProviders();
+    if (!skipConfirmation && !await requestConfirmation(parsingInstallPrompt(selected), '安装本地版面引擎？')) return null;
+    const optimistic = { ...selected, install: { ...parsingInstallation(selected), status: 'preparing', progress: 0, stage: '正在检查系统与磁盘空间' } };
+    renderLocalMinerUProvider(optimistic);
+    const operation = (async () => {
+      try {
+        const accepted = await api('/api/parsing/providers/local-mineru/install', { method: 'POST' });
+        const acceptedProvider = localMinerUFromPayload(accepted);
+        if (acceptedProvider) renderLocalMinerUProvider(acceptedProvider);
+        const completed = acceptedProvider && !parsingInstallStates.has(parsingInstallStatus(acceptedProvider))
+          ? acceptedProvider
+          : await monitorParsingInstall();
+        if (parsingProviderStatus(completed) === 'ready') showToast('版面引擎安装完成。');
+        return completed;
+      } catch (error) {
+        const failed = {
+          ...(currentLocalMinerUProvider || selected),
+          state: 'failed', reason_code: error.code || 'install_failed', ready: false,
+          error: error.message, details: error.details || {},
+        };
+        renderLocalMinerUProvider(failed, error);
+        return failed;
+      }
+    })();
+    parsingInstallPromise = operation.finally(() => { parsingInstallPromise = null; });
+    return parsingInstallPromise;
+  }
+
+  async function cancelLocalMinerUInstall() {
+    const provider = currentLocalMinerUProvider || {};
+    renderLocalMinerUProvider({ ...provider, install: { ...parsingInstallation(provider), status: 'cancelling', stage: '正在取消下载并清理临时文件' } });
+    try {
+      const payload = await api('/api/parsing/providers/local-mineru/install/cancel', { method: 'POST' });
+      if (parsingInstallPromise) await parsingInstallPromise;
+      else renderLocalMinerUProvider(localMinerUFromPayload(payload) || await fetchParsingProviders({ render: false }));
+    } catch (error) {
+      renderLocalMinerUProvider(currentLocalMinerUProvider || provider, error);
+    }
+  }
+
+  async function removeLocalMinerU() {
+    if (!await requestConfirmation('删除谷子学术管理的本地版面引擎及模型？已有文献和基础阅读功能不会受影响。', '删除本地版面引擎？')) return;
+    const button = $('#remove-local-mineru');
+    button.disabled = true;
+    try {
+      const payload = await api('/api/parsing/providers/local-mineru/component', { method: 'DELETE' });
+      renderLocalMinerUProvider(localMinerUFromPayload(payload) || await fetchParsingProviders({ render: false }));
+      showToast('本地版面引擎已删除。');
+    } catch (error) {
+      renderLocalMinerUProvider(currentLocalMinerUProvider || {}, error);
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  $('#install-local-mineru')?.addEventListener('click', () => { void installLocalMinerU(); });
+  $('#cancel-local-mineru-install')?.addEventListener('click', () => { void cancelLocalMinerUInstall(); });
+  $('#remove-local-mineru')?.addEventListener('click', () => { void removeLocalMinerU(); });
+
   async function loadSettings() {
     loadLibraryLocation();
     loadAppInfo();
+    if ($('#settings-view')?.classList.contains('active-view')) loadParsingProviders();
     const generation = ++settingsLoadGeneration;
     try {
       if (!await flushPendingSettings()) return false;
@@ -9448,6 +9744,7 @@
   let reflowPollToken = 0;
   let reflowPollTimer = null;
   let activeReflowJobId = '';
+  let reflowPreflightInFlight = false;
 
   function readerDocumentURL(source) {
     const url = new URL(String(source || ''), window.location.href);
@@ -9468,7 +9765,7 @@
     }
   }
 
-  function updateReflowButton(running, progress = 0) {
+  function updateReflowButton(running, progress = 0, runningLabel = '') {
     const button = $('#reflow-button');
     const label = $('#reflow-button-label');
     if (button) {
@@ -9476,7 +9773,7 @@
       button.classList.toggle('active', running);
       button.setAttribute('aria-busy', String(running));
     }
-    if (label) label.textContent = running ? `重排中 ${progress}%` : 'AI 重排';
+    if (label) label.textContent = running ? runningLabel || `重排中 ${progress}%` : 'AI 重排';
   }
 
   function renderReflowStatus(reflow = {}) {
@@ -9485,17 +9782,24 @@
     const raw = Number(reflow.progress);
     const percent = Math.round(Math.max(0, Math.min(100, Number.isFinite(raw) ? (raw <= 1 ? raw * 100 : raw) : 0)));
     const status = String(reflow.status || 'queued');
-    const statusLabels = { queued: 'AI 重排排队中', running: '正在进行 AI 重排', completed: 'AI 重排已完成', failed: 'AI 重排失败' };
+    const statusLabels = { queued: 'AI 重排排队中', running: '正在进行 AI 重排', cancelling: '正在取消 AI 重排', cancelled: 'AI 重排已取消', completed: 'AI 重排已完成', failed: 'AI 重排失败' };
+    const displayedPercent = status === 'completed' ? 100 : ['failed', 'cancelled', 'cancelling'].includes(status) ? Math.min(99, percent) : percent;
     panel.hidden = false;
     panel.dataset.state = status;
     $('#reflow-progress-label').textContent = statusLabels[status] || '正在进行 AI 重排';
     $('#reflow-progress-stage').textContent = String(reflow.error || reflow.stage || '').slice(0, 240);
-    $('#reflow-progress-value').textContent = `${status === 'completed' ? 100 : percent}%`;
-    $('#reflow-progress-bar').style.width = `${status === 'completed' ? 100 : percent}%`;
+    $('#reflow-progress-value').textContent = `${displayedPercent}%`;
+    $('#reflow-progress-bar').style.width = `${displayedPercent}%`;
     const track = $('#reflow-progress-track');
-    track?.setAttribute('aria-valuenow', String(status === 'completed' ? 100 : percent));
-    updateReflowButton(['queued', 'running'].includes(status), percent);
-    return percent;
+    track?.setAttribute('aria-valuenow', String(displayedPercent));
+    const active = ['queued', 'running', 'cancelling'].includes(status);
+    updateReflowButton(active, displayedPercent, status === 'cancelling' ? '正在取消重排…' : '');
+    const cancelButton = $('#cancel-reflow-button');
+    if (cancelButton) {
+      cancelButton.hidden = !active;
+      cancelButton.disabled = status === 'cancelling';
+    }
+    return displayedPercent;
   }
 
   function mergeReflowJob(job, documentURL = '') {
@@ -9512,10 +9816,10 @@
     if (token !== reflowPollToken || !job?.reflow) return true;
     const { reflow } = job;
     renderReflowStatus(reflow);
-    if (!['completed', 'failed'].includes(reflow.status)) return false;
+    if (!['completed', 'failed', 'cancelled'].includes(reflow.status)) return false;
     activeReflowJobId = '';
     updateReflowButton(false);
-    if (reflow.status === 'failed') {
+    if (['failed', 'cancelled'].includes(reflow.status)) {
       mergeReflowJob(job);
       return true;
     }
@@ -9549,9 +9853,66 @@
     reflowPollTimer = window.setTimeout(() => pollReflow(jobId, token), 900);
   }
 
+  async function ensureReflowCapability() {
+    try {
+      const provider = await fetchParsingProviders();
+      const status = parsingProviderStatus(provider);
+      if (status === 'ready') return true;
+      if (parsingInstallStates.has(parsingInstallStatus(provider))) {
+        if (!parsingInstallPromise) parsingInstallPromise = monitorParsingInstall().finally(() => { parsingInstallPromise = null; });
+        const completed = await parsingInstallPromise;
+        if (parsingProviderStatus(completed) === 'ready') return true;
+        renderReflowStatus({ status: 'failed', progress: 0, error: actionableParsingMessage(parsingErrorCode(completed), parsingDetails(completed), completed?.message) });
+        return false;
+      }
+      if (['not_installed', 'cancelled', 'failed'].includes(status)) {
+        const installed = await installLocalMinerU(provider);
+        if (!installed) return false;
+        if (parsingProviderStatus(installed) === 'ready') return true;
+        renderReflowStatus({ status: 'failed', progress: 0, error: actionableParsingMessage(parsingErrorCode(installed), parsingDetails(installed), installed?.message) });
+        return false;
+      }
+      renderReflowStatus({ status: 'failed', progress: 0, error: actionableParsingMessage(status, parsingDetails(provider), provider.message || provider.capability?.message) });
+      return false;
+    } catch (error) {
+      renderReflowStatus({ status: 'failed', progress: 0, error: actionableParsingMessage(error.code, error.details, error.message) });
+      return false;
+    }
+  }
+
+  async function cancelReflow() {
+    const jobId = activeReflowJobId;
+    const token = reflowPollToken;
+    if (!jobId) return;
+    const progress = Number.parseInt($('#reflow-progress-value')?.textContent || '0', 10) || 0;
+    window.clearTimeout(reflowPollTimer);
+    reflowPollTimer = null;
+    renderReflowStatus({ status: 'cancelling', stage: '正在停止版面解析进程', progress });
+    try {
+      const payload = await api(`/api/jobs/${jobId}/reflow`, { method: 'DELETE' });
+      if (token !== reflowPollToken || activeReflowJobId !== jobId) return;
+      const updated = payload.job || payload;
+      mergeReflowJob(updated);
+      if (!finishReflow(updated, token)) reflowPollTimer = window.setTimeout(() => pollReflow(jobId, token), 300);
+    } catch (error) {
+      if (token !== reflowPollToken || activeReflowJobId !== jobId) return;
+      renderReflowStatus({ status: 'running', stage: `取消失败：${error.message}，任务仍在继续`, progress });
+      reflowPollTimer = window.setTimeout(() => pollReflow(jobId, token), 900);
+    }
+  }
+
   async function startReflow() {
     const job = state.activeJob;
-    if (!job || activeReflowJobId) return;
+    if (!job || activeReflowJobId || reflowPreflightInFlight) return;
+    reflowPreflightInFlight = true;
+    const button = $('#reflow-button');
+    const label = $('#reflow-button-label');
+    if (button) { button.disabled = true; button.setAttribute('aria-busy', 'true'); }
+    if (label) label.textContent = '检查版面引擎…';
+    const ready = await ensureReflowCapability();
+    reflowPreflightInFlight = false;
+    if (!activeReflowJobId) updateReflowButton(false);
+    if (!ready || state.activeJob?.job_id !== job.job_id) return;
     const confirmed = await requestConfirmation('AI 重排会在后台重新分析当前文章。完成前会继续显示当前版本；只有成功后才切换到新版。', '开始 AI 重排？');
     if (!confirmed || state.activeJob?.job_id !== job.job_id) return;
     const token = ++reflowPollToken;
@@ -9573,6 +9934,7 @@
   }
 
   $('#reflow-button').addEventListener('click', startReflow);
+  $('#cancel-reflow-button')?.addEventListener('click', () => { void cancelReflow(); });
   function normalizeTypographyValue(key, value) {
     const limits = typographyLimits[key];
     const numeric = typeof value === 'number' ? value : typeof value === 'string' && value.trim() ? Number(value) : Number.NaN;

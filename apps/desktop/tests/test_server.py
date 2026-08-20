@@ -13,6 +13,7 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from http import HTTPStatus
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Optional
 from unittest.mock import MagicMock, patch
 import sys
@@ -28,6 +29,25 @@ from server import AI_STATUS_HISTORY_LIMIT, DataRootLock, MAX_CHAT_IMAGE_BYTES, 
 
 
 class PDFEvidenceWorkerTest(unittest.TestCase):
+    def test_dependency_smoke_checks_provider_imports_before_runtime_locks(self) -> None:
+        registry = MagicMock()
+        registry.list_capabilities.return_value = [
+            {"id": "local-mineru", "state": "artifact_unavailable", "ready": False},
+            {"id": "remote-guzi", "state": "disabled", "ready": False},
+        ]
+        with patch.object(sys, "argv", ["server.py", "--dependency-smoke"]), patch(
+            "server._runtime_lock_roots"
+        ) as runtime_roots, patch("server.ThreadingHTTPServer") as http_server, patch(
+            "server._parsing_provider_registry", return_value=registry
+        ), patch("builtins.print") as output:
+            server_module.main()
+        payload = json.loads(output.call_args.args[0])
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["hashlib_scrypt"])
+        self.assertEqual([item["id"] for item in payload["providers"]], ["local-mineru", "remote-guzi"])
+        runtime_roots.assert_not_called()
+        http_server.assert_not_called()
+
     def test_worker_mode_returns_before_runtime_locks_and_http_server(self) -> None:
         with tempfile.TemporaryDirectory(prefix="my-scholar-evidence-cli-") as temp:
             source = Path(temp) / "source.pdf"
@@ -296,8 +316,17 @@ class TranslationCacheTest(unittest.TestCase):
             peak = 0
             started = 0
 
-            def fake_process_pdf(_pdf_path: Path, _job_dir: Path, *, job_id: str, source_name: str, progress=None) -> dict:
+            def fake_process_pdf(
+                _pdf_path: Path,
+                _job_dir: Path,
+                *,
+                job_id: str,
+                source_name: str,
+                progress=None,
+                backend_override: Optional[str] = None,
+            ) -> dict:
                 nonlocal active, peak, started
+                self.assertEqual(backend_override, "odl")
                 with counter_lock:
                     active += 1
                     started += 1
@@ -1817,6 +1846,15 @@ class ReflowTest(unittest.TestCase):
         store.update(record["job_id"], status="completed", source_sha256=hashlib.sha256(source).hexdigest(), manifest=manifest)
         return store, store.get(record["job_id"]), source
 
+    @staticmethod
+    def _registry(provider: Optional[Any] = None) -> MagicMock:
+        active_provider = provider if provider is not None else MagicMock()
+        if provider is None:
+            active_provider.capability.return_value = {"id": "local-mineru", "state": "ready", "ready": True}
+        registry = MagicMock()
+        registry.get.return_value = active_provider
+        return registry
+
     def test_begin_reflow_is_atomic_and_rejects_duplicates(self) -> None:
         with tempfile.TemporaryDirectory(prefix="my-scholar-reflow-claim-") as temp:
             store, record, _ = self._completed_store(Path(temp))
@@ -1833,6 +1871,30 @@ class ReflowTest(unittest.TestCase):
             self.assertEqual(results.count("accepted"), 1)
             self.assertEqual(results.count("conflict"), 23)
             self.assertEqual(store.get(record["job_id"])["status"], "completed")
+
+    def test_reflow_cancel_transitions_are_generation_safe(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="my-scholar-reflow-cancel-") as temp:
+            store, record, _ = self._completed_store(Path(temp))
+            queued = store.begin_reflow(record["job_id"])
+            generation = queued["reflow"]["generation"]
+            cancelled = store.request_reflow_cancel(record["job_id"])
+            self.assertEqual(cancelled["reflow"]["status"], "cancelled")
+            self.assertIsNone(store.claim_reflow(record["job_id"], generation))
+
+            next_record = store.begin_reflow(record["job_id"])
+            next_generation = next_record["reflow"]["generation"]
+            self.assertGreater(next_generation, generation)
+            self.assertIsNotNone(store.claim_reflow(record["job_id"], next_generation))
+            cancelling = store.request_reflow_cancel(record["job_id"])
+            self.assertEqual(cancelling["reflow"]["status"], "cancelling")
+            self.assertFalse(store.update_reflow(
+                record["job_id"],
+                next_generation,
+                expected_statuses={"running"},
+                status="running",
+                progress=0.8,
+            ))
+            self.assertFalse(store.complete_reflow(record["job_id"], next_generation, {}, {}))
 
     def test_reflow_success_switches_generation_without_touching_user_data(self) -> None:
         with tempfile.TemporaryDirectory(prefix="my-scholar-reflow-success-") as temp:
@@ -1852,10 +1914,9 @@ class ReflowTest(unittest.TestCase):
             queued = store.begin_reflow(record["job_id"])
             generation = queued["reflow"]["generation"]
 
-            def fake_process(pdf_path: Path, output: Path, **kwargs: Any) -> dict:
-                self.assertEqual(Path(pdf_path).read_bytes(), source)
-                self.assertEqual(kwargs["backend_override"], "layout")
-                self.assertTrue(kwargs["refresh_layout_sidecar"])
+            def fake_run(request: Any, **kwargs: Any) -> Any:
+                output = Path(request.output_dir)
+                self.assertEqual(Path(request.source_pdf).read_bytes(), source)
                 (output / "source.pdf").write_bytes(source)
                 (output / "document.html").write_text("<html>new</html>", encoding="utf-8")
                 (output / "document.json").write_text("{}", encoding="utf-8")
@@ -1864,11 +1925,14 @@ class ReflowTest(unittest.TestCase):
                 manifest = {"job_id": record["job_id"], "source": {"filename": "paper.pdf"}, "validation": {"status": "PASS"}}
                 (output / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
                 kwargs["progress"]("生成语义文档", 0.7)
-                return manifest
+                return SimpleNamespace(manifest=manifest, metrics={"provider_id": "local-mineru"})
+
+            provider = MagicMock()
+            provider.run.side_effect = fake_run
 
             with (
                 patch.object(server_module, "STORE", store),
-                patch.object(server_module, "process_pdf", side_effect=fake_process) as process,
+                patch.object(server_module, "_parsing_provider_registry", return_value=self._registry(provider)),
                 patch.object(server_module, "_enqueue_metadata") as enqueue_metadata,
             ):
                 server_module._run_reflow_job(record["job_id"], "paper.pdf", generation)
@@ -1880,7 +1944,7 @@ class ReflowTest(unittest.TestCase):
             self.assertTrue((job_dir / "renders" / str(generation) / "document.html").is_file())
             for relative, body in preserved.items():
                 self.assertEqual((job_dir / relative).read_bytes(), body)
-            process.assert_called_once()
+            provider.run.assert_called_once()
             enqueue_metadata.assert_called_once_with(record["job_id"], False, "refine", force=True)
             public = server_module._public_job(current)
             expected_url = f"/api/jobs/{record['job_id']}/renders/{generation}/document.html"
@@ -1893,7 +1957,11 @@ class ReflowTest(unittest.TestCase):
             queued = store.begin_reflow(record["job_id"])
             generation = queued["reflow"]["generation"]
             old_url = server_module._public_job(record)["links"]["html"]
-            with patch.object(server_module, "STORE", store), patch.object(server_module, "process_pdf", side_effect=PipelineError("layout unavailable")):
+            provider = MagicMock()
+            provider.run.side_effect = PipelineError("layout unavailable")
+            with patch.object(server_module, "STORE", store), patch.object(
+                server_module, "_parsing_provider_registry", return_value=self._registry(provider)
+            ):
                 server_module._run_reflow_job(record["job_id"], "paper.pdf", generation)
             current = store.get(record["job_id"])
             self.assertEqual(current["status"], "completed")
@@ -1908,9 +1976,11 @@ class ReflowTest(unittest.TestCase):
             responses: list[tuple[dict, HTTPStatus]] = []
             errors: list[tuple[str, HTTPStatus]] = []
             handler._send_json = lambda body, status=HTTPStatus.OK: responses.append((body, status))
-            handler._send_error_json = lambda message, status=HTTPStatus.BAD_REQUEST: errors.append((message, status))
+            handler._send_error_json = lambda message, status=HTTPStatus.BAD_REQUEST, **_kwargs: errors.append((message, status))
             work_queue: queue.Queue = queue.Queue()
-            with patch.object(server_module, "STORE", store), patch.object(server_module, "REFLOW_QUEUE", work_queue):
+            with patch.object(server_module, "STORE", store), patch.object(server_module, "REFLOW_QUEUE", work_queue), patch.object(
+                server_module, "_parsing_provider_registry", return_value=self._registry()
+            ):
                 handler._start_reflow(record["job_id"])
                 handler._start_reflow(record["job_id"])
             self.assertEqual(responses[0][1], HTTPStatus.ACCEPTED)
@@ -1919,6 +1989,63 @@ class ReflowTest(unittest.TestCase):
             self.assertIsNone(responses[0][0]["reflow"]["document_url"])
             self.assertEqual(errors[-1][1], HTTPStatus.CONFLICT)
             self.assertEqual(work_queue.qsize(), 1)
+
+    def test_start_reflow_preflight_fails_before_reserving_generation(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="my-scholar-reflow-preflight-") as temp:
+            store, record, _ = self._completed_store(Path(temp))
+            provider = MagicMock()
+            provider.capability.return_value = {
+                "id": "local-mineru",
+                "state": "artifact_unavailable",
+                "reason_code": "artifact_unavailable",
+                "ready": False,
+                "message": "本地版面引擎 artifact 尚未提供。",
+            }
+            handler = object.__new__(ScholarHandler)
+            errors: list[tuple[str, HTTPStatus, dict]] = []
+            handler._send_json = lambda *_args, **_kwargs: self.fail("unexpected success")
+            handler._send_error_json = lambda message, status=HTTPStatus.BAD_REQUEST, **kwargs: errors.append((message, status, kwargs))
+            work_queue: queue.Queue = queue.Queue()
+            with patch.object(server_module, "STORE", store), patch.object(server_module, "REFLOW_QUEUE", work_queue), patch.object(
+                server_module, "_parsing_provider_registry", return_value=self._registry(provider)
+            ):
+                handler._start_reflow(record["job_id"])
+            self.assertNotIn("reflow", store.get(record["job_id"]))
+            self.assertEqual(work_queue.qsize(), 0)
+            self.assertEqual(errors[0][1], HTTPStatus.PRECONDITION_REQUIRED)
+            self.assertEqual(errors[0][2]["code"], "artifact_unavailable")
+
+    def test_start_reflow_rejects_active_component_install_before_reserving_generation(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="my-scholar-reflow-install-race-") as temp:
+            store, record, _ = self._completed_store(Path(temp))
+            handler = object.__new__(ScholarHandler)
+            errors: list[tuple[str, HTTPStatus, dict]] = []
+            handler._send_json = lambda *_args, **_kwargs: self.fail("unexpected success")
+            handler._send_error_json = lambda message, status=HTTPStatus.BAD_REQUEST, **kwargs: errors.append((message, status, kwargs))
+            install_thread = MagicMock()
+            install_thread.is_alive.return_value = True
+            with patch.object(server_module, "STORE", store), patch.object(
+                server_module, "PARSING_INSTALL_THREAD", install_thread
+            ), patch.object(server_module, "_parsing_provider_registry", return_value=self._registry()):
+                handler._start_reflow(record["job_id"])
+            self.assertNotIn("reflow", store.get(record["job_id"]))
+            self.assertEqual(errors[0][1], HTTPStatus.CONFLICT)
+            self.assertEqual(errors[0][2]["code"], "busy")
+
+    def test_cancel_reflow_sets_the_live_cancel_event(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="my-scholar-reflow-cancel-api-") as temp:
+            store, record, _ = self._completed_store(Path(temp))
+            queued = store.begin_reflow(record["job_id"])
+            generation = queued["reflow"]["generation"]
+            handler = object.__new__(ScholarHandler)
+            responses: list[tuple[dict, HTTPStatus]] = []
+            handler._send_json = lambda body, status=HTTPStatus.OK: responses.append((body, status))
+            handler._send_error_json = lambda *_args, **_kwargs: self.fail("unexpected error")
+            with patch.object(server_module, "STORE", store):
+                handler._cancel_reflow(record["job_id"])
+            self.assertEqual(responses[0][0]["reflow"]["status"], "cancelled")
+            self.assertTrue(server_module._reflow_cancel_event(record["job_id"], generation).is_set())
+            server_module._forget_reflow_cancel_event(record["job_id"], generation)
 
     def test_post_reflow_route_dispatches_to_single_contract(self) -> None:
         handler = object.__new__(ScholarHandler)
@@ -1929,14 +2056,54 @@ class ReflowTest(unittest.TestCase):
             handler.do_POST()
         self.assertEqual(dispatched, ["a" * 16])
 
+    def test_parsing_provider_status_route_returns_local_and_disabled_remote(self) -> None:
+        handler = object.__new__(ScholarHandler)
+        handler.path = "/api/parsing/providers"
+        responses: list[dict] = []
+        handler._send_json = lambda body, *_args, **_kwargs: responses.append(body)
+        registry = MagicMock()
+        registry.list_capabilities.return_value = [
+            {"id": "local-mineru", "state": "artifact_unavailable", "ready": False},
+            {"id": "remote-guzi", "state": "disabled", "reason_code": "not_configured", "ready": False},
+        ]
+        with patch.object(server_module, "_parsing_provider_registry", return_value=registry):
+            handler.do_GET()
+        self.assertEqual([item["id"] for item in responses[0]["providers"]], ["local-mineru", "remote-guzi"])
+
+    def test_provider_install_rejects_unpublished_artifact_without_starting_thread(self) -> None:
+        handler = object.__new__(ScholarHandler)
+        errors: list[tuple[str, HTTPStatus, dict]] = []
+        handler._send_json = lambda *_args, **_kwargs: self.fail("unexpected success")
+        handler._send_error_json = lambda message, status=HTTPStatus.BAD_REQUEST, **kwargs: errors.append((message, status, kwargs))
+        provider = MagicMock()
+        provider.capability.return_value = {
+            "id": "local-mineru",
+            "state": "artifact_unavailable",
+            "reason_code": "artifact_unavailable",
+            "ready": False,
+            "can_install": False,
+            "message": "本地版面引擎 artifact 尚未提供。",
+        }
+        registry = MagicMock()
+        registry.get.return_value = provider
+        with patch.object(server_module, "_parsing_provider_registry", return_value=registry), patch.object(
+            server_module, "PARSING_INSTALL_THREAD", None
+        ):
+            handler._start_provider_install("local-mineru")
+        provider.install.assert_not_called()
+        self.assertEqual(errors[0][1], HTTPStatus.PRECONDITION_REQUIRED)
+        self.assertEqual(errors[0][2]["code"], "artifact_unavailable")
+
     def test_start_reflow_rejects_missing_incomplete_and_readonly_jobs(self) -> None:
         with tempfile.TemporaryDirectory(prefix="my-scholar-reflow-boundary-") as temp:
             store, record, _ = self._completed_store(Path(temp))
             handler = object.__new__(ScholarHandler)
             errors: list[tuple[str, HTTPStatus]] = []
             handler._send_json = lambda *_args, **_kwargs: self.fail("unexpected success")
-            handler._send_error_json = lambda message, status=HTTPStatus.BAD_REQUEST: errors.append((message, status))
-            with patch.object(server_module, "STORE", store):
+            handler._send_error_json = lambda message, status=HTTPStatus.BAD_REQUEST, **_kwargs: errors.append((message, status))
+            with patch.object(server_module, "STORE", store), patch.object(
+                server_module, "_parsing_provider_registry", return_value=self._registry()
+            ):
                 handler._start_reflow("f" * 16)
                 store.update(record["job_id"], status="running")
                 handler._start_reflow(record["job_id"])
