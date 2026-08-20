@@ -24,7 +24,7 @@ let browserSession;
         platform: 'darwin',
         getStartupContext: async () => ({
           ok: true,
-          app: { name: '谷子学术', version: '0.1.1', platform: 'darwin', arch: 'arm64', channel: 'internal' },
+          app: { name: '谷子学术', version: '0.1.2', platform: 'darwin', arch: 'arm64', channel: 'internal' },
           storage: {
             state: 'conflict',
             adopted: false,
@@ -35,11 +35,11 @@ let browserSession;
         selectStartupLibrary: async (selectedPath) => ({ ok: true, reloading: false, currentPath: selectedPath, items: 0, jobs: 0 }),
         checkForUpdates: async () => {
           window.__updateCheckCount += 1;
-          if (window.__updateCheckCount === 1) return { ok: true, status: 'current', currentVersion: '0.1.1', version: '0.1.1', checkedAt: new Date().toISOString() };
+          if (window.__updateCheckCount === 1) return { ok: true, status: 'current', currentVersion: '0.1.2', version: '0.1.2', checkedAt: new Date().toISOString() };
           return {
             ok: true,
             status: 'available',
-            currentVersion: '0.1.1',
+            currentVersion: '0.1.2',
             version: '0.1.1',
             publishedAt: '2026-08-07T00:00:00Z',
             notes: '验证设置中的下载入口。',
@@ -120,7 +120,7 @@ let browserSession;
   await page.locator('[data-view="settings-view"]').click();
   await page.locator('#settings-view.active-view').waitFor();
   if (await page.locator('#onboarding-settings-row').isHidden()) throw new Error('桌面设置没有提供重新查看新手引导的入口');
-  await page.waitForFunction(() => document.querySelector('#app-current-version')?.textContent.trim() === 'v0.1.1');
+  await page.waitForFunction(() => document.querySelector('#app-current-version')?.textContent.trim() === 'v0.1.2');
   if (await page.locator('a[href="#settings-updates"]').count() !== 1) throw new Error('设置导航缺少“关于与更新”入口');
   await page.locator('a[href="#settings-updates"]').click();
   await page.locator('#check-updates').click();

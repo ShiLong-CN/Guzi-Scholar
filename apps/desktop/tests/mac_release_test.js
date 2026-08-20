@@ -70,7 +70,7 @@ assert.strictEqual(manifest.build?.productName, '谷子学术');
 assert.strictEqual(manifest.build?.directories?.output, 'dist/mac.noindex');
 assert.strictEqual(manifest.build?.mac?.extendInfo?.CFBundleDisplayName, '谷子学术');
 assert.strictEqual(manifest.build?.mac?.extendInfo?.CFBundleName, '谷子学术');
-assert.strictEqual(manifest.version, '0.1.1');
+assert.strictEqual(manifest.version, '0.1.2');
 assert.strictEqual(manifest.build?.afterPack, 'scripts/after-pack.cjs');
 assert.match(manifest.scripts?.['pack:mac'] || '', /prepare:mac/u);
 assert.match(manifest.scripts?.['dist:mac'] || '', /prepare:mac/u);
@@ -118,7 +118,8 @@ assert.doesNotMatch(releaseWorkflow, /if:\s*startsWith\(github\.ref, 'refs\/tags
 assert.match(releaseWorkflow, /format\('refs\/tags\/\{0\}', inputs\.release_tag\)/u, 'manual publishing must checkout an exact tag ref');
 assert.match(releaseWorkflow, /gh release create[\s\S]*--verify-tag/u, 'manual publishing must refuse to synthesize a missing tag');
 assert.match(releaseWorkflow, /Verify packaged runtime boundary[\s\S]*mac_release_test\.js/u);
-assert.match(releaseWorkflow, /PUBLISH_RELEASE:[\s\S]*inputs\.publish_release[\s\S]*run: \|[\s\S]*dist:mac[\s\S]*else[\s\S]*dist:mac:internal/u, 'manual publishing must build the signed release target');
+assert.match(releaseWorkflow, /Build internal macOS package[\s\S]*dist:mac:internal/u, 'tag builds must remain internal');
+assert.match(releaseWorkflow, /Build signed macOS release package[\s\S]*inputs\.publish_release[\s\S]*dist:mac/u, 'manual publishing must build the signed release target');
 assert.match(releaseWorkflow, /CSC_LINK:.*secrets\.MACOS_CSC_LINK/u);
 assert.match(releaseWorkflow, /certifi==2025\.8\.3/u);
 assert.doesNotMatch(releaseWorkflow, /^  windows:/mu, 'Windows packaging must remain disabled until its runtime is self-contained');

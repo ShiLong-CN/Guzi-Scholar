@@ -56,20 +56,19 @@ jobs:
           echo "MY_SCHOLAR_ODL_SHA256=104a5523c812ba3a43a3c7dd6156e33f23d0e32f03ef1ac629009ef96d7a79e1" >> "$GITHUB_ENV"
           echo "MY_SCHOLAR_BUILD_PYTHON=$(command -v python3)" >> "$GITHUB_ENV"
           echo "MY_SCHOLAR_JAVA_HOME=$JAVA_HOME" >> "$GITHUB_ENV"
-      - name: Build gated macOS package
+      - name: Build internal macOS package
+        if: github.event_name != 'workflow_dispatch' || inputs.publish_release != true
+        run: npm --prefix apps/desktop run dist:mac:internal
+
+      - name: Build signed macOS release package
+        if: github.event_name == 'workflow_dispatch' && inputs.publish_release == true
         env:
-          PUBLISH_RELEASE: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_release }}
           CSC_LINK: ${{ secrets.MACOS_CSC_LINK }}
           CSC_KEY_PASSWORD: ${{ secrets.MACOS_CSC_KEY_PASSWORD }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: |
-          if [[ "$PUBLISH_RELEASE" == "true" ]]; then
-            npm --prefix apps/desktop run dist:mac
-          else
-            npm --prefix apps/desktop run dist:mac:internal
-          fi
+        run: npm --prefix apps/desktop run dist:mac
       - name: Verify packaged runtime boundary
         run: node apps/desktop/tests/mac_release_test.js "apps/desktop/dist/mac.noindex/mac-arm64/谷子学术.app"
       - name: Upload macOS artifact

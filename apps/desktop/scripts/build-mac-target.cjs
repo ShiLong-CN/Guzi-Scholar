@@ -55,7 +55,7 @@ function main() {
   if (target === 'check') return 0;
 
   preventBuildOutputIndexing();
-  const args = ['--mac', target, '--arm64'];
+  const args = ['--mac', target, '--arm64', '--publish=never'];
   if (mode === 'internal') {
     args.push(
       '--config.mac.identity=-',
