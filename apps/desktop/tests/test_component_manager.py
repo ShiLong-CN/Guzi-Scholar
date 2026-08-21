@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 import os
+import platform as platform_module
 import sys
 import tempfile
 import threading
@@ -36,6 +37,12 @@ TEAM_ID = "ABCDE12345"
 SIGNING_IDENTITY = f"Developer ID Application: Guzi Scholar Test ({TEAM_ID})"
 FAKE_URL = "https://components.example.invalid/mineru.zip"
 FAKE_MACHO = b"\xcf\xfa\xed\xfe" + b"guzi-test-macho"
+TEST_PLATFORM = {"macos": "darwin", "mac": "darwin", "win32": "windows"}.get(sys.platform, sys.platform)
+TEST_ARCH = {
+    "aarch64": "arm64",
+    "amd64": "x64",
+    "x86_64": "x64",
+}.get(platform_module.machine().strip().lower(), platform_module.machine().strip().lower())
 
 
 def make_zip(path: Path, members: dict[str, bytes]) -> None:
@@ -52,8 +59,8 @@ def manifest_mapping(archive: Path, **overrides: object) -> dict[str, object]:
         "component": "mineru",
         "version": "test-1.0.0",
         "model_version": "test-model-1",
-        "platform": "darwin",
-        "arch": "arm64",
+        "platform": TEST_PLATFORM,
+        "arch": TEST_ARCH,
         "archive_type": "zip",
         "archive_size": archive.stat().st_size,
         "installed_size": 1024 * 1024,
@@ -91,14 +98,14 @@ def catalog_for(mapping: dict[str, object]) -> dict[str, object]:
                 "version": mapping["version"],
                 "model_version": mapping["model_version"],
                 "requirements": requirements,
-                "artifacts": {"darwin-arm64": artifact},
+                "artifacts": {f"{mapping['platform']}-{mapping['arch']}": artifact},
             }
         },
     }
 
 
 def healthy_system(_root: Path) -> SystemInfo:
-    return SystemInfo("darwin", "arm64", "15.0", 32 * 1024**3, 100 * 1024**3)
+    return SystemInfo(TEST_PLATFORM, TEST_ARCH, "15.0", 32 * 1024**3, 100 * 1024**3)
 
 
 class FakeResponse:
@@ -309,6 +316,7 @@ class ComponentManagerTest(unittest.TestCase):
         self.assertFalse(any(call.args[0][0] == "/usr/sbin/spctl" for call in run.call_args_list))
 
     def test_platform_memory_and_disk_preflight_are_distinct(self) -> None:
+        darwin_mapping = manifest_mapping(self.archive, platform="darwin", arch="arm64")
         cases = [
             (SystemInfo("windows", "x64", "15.0", 32 * 1024**3, 100 * 1024**3), "unsupported_platform"),
             (SystemInfo("darwin", "arm64", "13.6", 32 * 1024**3, 100 * 1024**3), "incompatible_os"),
@@ -317,7 +325,7 @@ class ComponentManagerTest(unittest.TestCase):
         ]
         for info, expected in cases:
             with self.subTest(expected=expected):
-                manager = self.manager(system_probe=lambda _root, value=info: value)
+                manager = self.manager(mapping=darwin_mapping, system_probe=lambda _root, value=info: value)
                 manifest = manager.manifest_for("mineru")
                 self.assertIsNotNone(manifest)
                 self.assertEqual(manager.status(manifest)["reason_code"], expected)
@@ -338,7 +346,7 @@ class ComponentManagerTest(unittest.TestCase):
         result = manager.install(manifest, progress=lambda stage, value: progress.append((stage, value)))
         self.assertEqual(result["state"], "ready")
         self.assertTrue(manager.executable_path(manifest).is_file())
-        self.assertEqual(target, (self.root / "components/mineru/test-1.0.0/darwin-arm64").resolve())
+        self.assertEqual(target, (self.root / f"components/mineru/test-1.0.0/{TEST_PLATFORM}-{TEST_ARCH}").resolve())
         self.assertTrue(verification_paths)
         self.assertEqual(progress[-1], ("安装完成", 1.0))
         self.assertFalse(list((self.root / "components").rglob("*.part")))
@@ -558,7 +566,7 @@ class ComponentManagerTest(unittest.TestCase):
             self.assertEqual(failed["state"], "failed")
             self.assertEqual(failed["reason_code"], "remove_cleanup_failed")
             self.assertTrue(failed["cleanup_pending"])
-            trash = list(target.parent.glob(".trash-darwin-arm64-*"))
+            trash = list(target.parent.glob(f".trash-{TEST_PLATFORM}-{TEST_ARCH}-*"))
             self.assertEqual(len(trash), 1)
             self.assertTrue((trash[0] / "component.json").is_file())
 
