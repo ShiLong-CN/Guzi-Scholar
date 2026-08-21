@@ -201,11 +201,11 @@ class ComponentManagerTest(unittest.TestCase):
             "component_manager.platform_module.machine", return_value="arm64"
         ):
             imported = destination.import_existing("mineru", source)
-        manifest = destination.manifest_for("mineru")
-        self.assertTrue(manifest.local_only)
-        self.assertEqual(imported["state"], "ready")
-        self.assertTrue(destination.target_dir(manifest).is_dir())
-        self.assertTrue(source.is_dir())
+            manifest = destination.manifest_for("mineru")
+            self.assertTrue(manifest.local_only)
+            self.assertEqual(imported["state"], "ready")
+            self.assertTrue(destination.target_dir(manifest).is_dir())
+            self.assertTrue(source.is_dir())
 
     def test_external_component_pointer_revalidates_and_never_deletes_the_environment(self) -> None:
         executable = self.root / "external-mineru/bin/mineru"
