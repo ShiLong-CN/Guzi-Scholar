@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from document_ir import odl_to_ir, pdf_page_sizes, render_pages, serializable_ir
+from mineru_discovery import discover_mineru
 from toolchain_paths import tool_path_candidates
 
 
@@ -782,26 +783,11 @@ def _record_backend_selection(job_dir: Path, manifest: dict, selection: Dict[str
 
 def _fresh_layout_backend(layout_module: Any) -> Tuple[Optional[Path], str]:
     """Resolve a runnable MinerU binary without consulting cached sidecars."""
-    configured_bin = os.environ.get("MY_SCHOLAR_MINERU")
-    possible = [configured_bin] if configured_bin else []
-    possible.extend(
-        str(candidate)
-        for candidate in tool_path_candidates(PROJECT_ROOT, "pdf-tools", "envs", "mineru", "bin", "mineru")
-    )
-    possible.append(shutil.which("mineru") or "")
-    failures: List[str] = []
-    for candidate in possible:
-        if not candidate or not Path(candidate).is_file():
-            continue
-        executable = Path(candidate).expanduser().resolve()
-        failure = layout_module._mineru_health_failure(executable)
-        if failure is None:
-            return executable, "mineru-executable"
-        failures.append(f"{executable}: {failure}")
-        if configured_bin:
-            raise layout_module.LayoutPipelineError(f"MY_SCHOLAR_MINERU 不可用：{failure}")
-    if failures:
-        raise layout_module.LayoutPipelineError("MinerU 不可用：" + "; ".join(failures))
+    candidate, failure = discover_mineru(project_root=PROJECT_ROOT)
+    if candidate:
+        return candidate.executable, "mineru-executable"
+    if failure and os.environ.get("MY_SCHOLAR_MINERU"):
+        raise layout_module.LayoutPipelineError(f"MY_SCHOLAR_MINERU 不可用：{failure}")
     return None, "unavailable"
 
 

@@ -12,6 +12,7 @@ contextBridge.exposeInMainWorld('myScholarDesktop', Object.freeze({
   copyImage: (dataURL) => ipcRenderer.invoke('my-scholar:copy-image', dataURL),
   getLibraryLocation: () => ipcRenderer.invoke('my-scholar:get-library-location'),
   chooseLibraryLocation: () => ipcRenderer.invoke('my-scholar:choose-library-location'),
+  chooseMineruComponent: () => ipcRenderer.invoke('my-scholar:choose-mineru-component'),
   getStartupContext: () => ipcRenderer.invoke('my-scholar:get-startup-context'),
   selectStartupLibrary: (selectedPath) => ipcRenderer.invoke('my-scholar:select-startup-library', selectedPath),
   checkForUpdates: () => ipcRenderer.invoke('my-scholar:check-for-updates'),

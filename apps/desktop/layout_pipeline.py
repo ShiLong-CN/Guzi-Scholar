@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
 from document_ir import _marker_drawing_pages, mineru_to_ir, render_pages, serializable_ir
+from mineru_discovery import discover_mineru
 from toolchain_paths import tool_path_candidates
 
 
@@ -958,26 +959,11 @@ def _find_layout_sidecar(pdf_path: Path, source_name: Optional[str] = None) -> T
 
     if os.environ.get("MY_SCHOLAR_DISABLE_MINERU", "").lower() in {"1", "true", "yes"}:
         return None, "disabled"
-    configured_bin = os.environ.get("MY_SCHOLAR_MINERU")
-    possible = [configured_bin] if configured_bin else []
-    possible.extend(
-        str(candidate)
-        for candidate in tool_path_candidates(PROJECT_ROOT, "pdf-tools", "envs", "mineru", "bin", "mineru")
-    )
-    possible.append(shutil.which("mineru") or "")
-    failures: List[str] = []
-    for candidate in possible:
-        if not candidate or not Path(candidate).is_file():
-            continue
-        executable = Path(candidate).expanduser().resolve()
-        failure = _mineru_health_failure(executable)
-        if failure is None:
-            return executable, "mineru-executable"
-        failures.append(f"{executable}: {failure}")
-        if configured_bin:
-            raise LayoutPipelineError(f"MY_SCHOLAR_MINERU 不可用：{failure}")
-    if failures:
-        raise LayoutPipelineError("MinerU 不可用：" + "; ".join(failures))
+    candidate, failure = discover_mineru(project_root=PROJECT_ROOT)
+    if candidate:
+        return candidate.executable, "mineru-executable"
+    if failure and os.environ.get("MY_SCHOLAR_MINERU"):
+        raise LayoutPipelineError(f"MY_SCHOLAR_MINERU 不可用：{failure}")
     return None, "unavailable"
 
 

@@ -150,17 +150,102 @@ class ComponentManagerTest(unittest.TestCase):
         destination.write_bytes(data)
         on_bytes(len(data), manifest.archive_size)
 
-    def test_production_catalog_has_no_artifact_or_url(self) -> None:
-        encoded = json.dumps(PRODUCTION_COMPONENT_CATALOG)
-        self.assertNotIn("http://", encoded)
-        self.assertNotIn("https://", encoded)
-        self.assertEqual(PRODUCTION_COMPONENT_CATALOG["components"]["mineru"]["artifacts"], {})
+    def test_production_catalog_has_no_download_artifact(self) -> None:
+        component = PRODUCTION_COMPONENT_CATALOG["components"]["mineru"]
+        self.assertEqual(component["artifacts"], {})
+        self.assertTrue(component["install_help_url"].startswith("https://"))
+
+    def test_production_manager_discovers_a_receipt_backed_local_component(self) -> None:
+        installed = self.manager(downloader=self.copy_downloader)
+        installed_manifest = installed.manifest_for("mineru")
+        installed.install(installed_manifest)
+
+        discovered = ComponentManager(
+            self.root / "components",
+            catalog=PRODUCTION_COMPONENT_CATALOG,
+            system_probe=healthy_system,
+            signature_verifier=lambda _path, _manifest: None,
+            executable_health_check=lambda _path, _manifest: None,
+        )
+        with patch("component_manager.sys.platform", "darwin"), patch(
+            "component_manager.platform_module.machine", return_value="arm64"
+        ):
+            manifest = discovered.manifest_for("mineru")
+            self.assertIsNotNone(manifest)
+            self.assertTrue(manifest.local_only)
+            self.assertEqual(discovered.status(manifest)["state"], "ready")
+            self.assertEqual(discovered.discovery_status("mineru")["state"], "found")
+
+    def test_import_existing_component_copies_without_deleting_source(self) -> None:
+        source_root = self.root / "source-components"
+        source_manager = ComponentManager(
+            source_root,
+            catalog=catalog_for(self.mapping),
+            downloader=self.copy_downloader,
+            system_probe=healthy_system,
+            signature_verifier=lambda _path, _manifest: None,
+            executable_health_check=lambda _path, _manifest: None,
+        )
+        source_manifest = source_manager.manifest_for("mineru")
+        source_manager.install(source_manifest)
+        source = source_manager.target_dir(source_manifest)
+
+        destination = ComponentManager(
+            self.root / "destination-components",
+            catalog=PRODUCTION_COMPONENT_CATALOG,
+            system_probe=healthy_system,
+            signature_verifier=lambda _path, _manifest: None,
+            executable_health_check=lambda _path, _manifest: None,
+        )
+        with patch("component_manager.sys.platform", "darwin"), patch(
+            "component_manager.platform_module.machine", return_value="arm64"
+        ):
+            imported = destination.import_existing("mineru", source)
+            manifest = destination.manifest_for("mineru")
+            self.assertTrue(manifest.local_only)
+            self.assertEqual(imported["state"], "ready")
+            self.assertTrue(destination.target_dir(manifest).is_dir())
+            self.assertTrue(source.is_dir())
+
+    def test_external_component_pointer_revalidates_and_never_deletes_the_environment(self) -> None:
+        executable = self.root / "external-mineru/bin/mineru"
+        executable.parent.mkdir(parents=True)
+        executable.write_text(
+            f"#!{sys.executable}\nimport sys\nprint('mineru test' if '--version' in sys.argv else 'Usage: mineru')\n",
+            encoding="utf-8",
+        )
+        executable.chmod(0o755)
+        manager = ComponentManager(self.root / "external-components", catalog=PRODUCTION_COMPONENT_CATALOG)
+        configured = manager.configure_external("mineru", executable)
+        self.assertEqual(configured.executable, executable.resolve())
+        self.assertEqual(manager.external_candidate("mineru").executable, executable.resolve())
+        candidate, status = manager.external_candidate_status("mineru")
+        self.assertEqual(candidate.executable, executable.resolve())
+        self.assertEqual(status["state"], "ready")
+        executable.write_text(executable.read_text(encoding="utf-8") + "# changed\n", encoding="utf-8")
+        self.assertIsNone(manager.external_candidate("mineru"))
+        candidate, status = manager.external_candidate_status("mineru")
+        self.assertIsNone(candidate)
+        self.assertEqual(status["state"], "external_changed")
+        self.assertTrue(manager.clear_external("mineru"))
+        self.assertTrue(executable.is_file())
 
     def test_manifest_rejects_insecure_url_and_missing_darwin_signing_identity(self) -> None:
         with self.assertRaisesRegex(ComponentError, "HTTPS"):
             ComponentManifest.from_mapping({**self.mapping, "url": "http://example.invalid/mineru.zip"})
         with self.assertRaisesRegex(ComponentError, "签名身份"):
             ComponentManifest.from_mapping({**self.mapping, "signing_identity": "", "team_id": ""})
+        adhoc = ComponentManifest.from_mapping({
+            **self.mapping,
+            "signature_policy": "adhoc-sha256",
+            "signing_identity": "",
+            "team_id": "",
+        })
+        self.assertEqual(adhoc.signature_policy, "adhoc-sha256")
+        with self.assertRaisesRegex(ComponentError, "不能声明"):
+            ComponentManifest.from_mapping({**self.mapping, "signature_policy": "adhoc-sha256"})
+        with self.assertRaisesRegex(ComponentError, "签名策略"):
+            ComponentManifest.from_mapping({**self.mapping, "signature_policy": "disabled"})
         with self.assertRaisesRegex(ComponentError, "--self-test"):
             ComponentManifest.from_mapping({**self.mapping, "health_check_args": ["--help"]})
 
@@ -206,6 +291,28 @@ class ComponentManagerTest(unittest.TestCase):
             self.assertIsNone(_default_signature_verifier(Path("/managed/bin/mineru"), manifest))
         self.assertEqual(run.call_args_list[0].args[0][:2], ["/usr/bin/file", "-b"])
         self.assertEqual(run.call_args_list[-1].args[0][:4], ["/usr/sbin/spctl", "--assess", "--type", "execute"])
+
+    def test_preview_signature_policy_accepts_only_verified_adhoc_code(self) -> None:
+        manifest = ComponentManifest.from_mapping({
+            **self.mapping,
+            "signature_policy": "adhoc-sha256",
+            "signing_identity": "",
+            "team_id": "",
+        })
+        successful = [
+            type("Completed", (), {"returncode": 0, "stdout": "Mach-O 64-bit executable arm64"})(),
+            type("Completed", (), {"returncode": 0, "stdout": ""})(),
+            type("Completed", (), {
+                "returncode": 0,
+                "stdout": "Signature=adhoc\nTeamIdentifier=not set\n",
+            })(),
+        ]
+        with patch("component_manager.Path.is_file", return_value=True), patch(
+            "component_manager.subprocess.run", side_effect=successful
+        ) as run:
+            self.assertIsNone(_default_signature_verifier(Path("/managed/bin/mineru"), manifest))
+        self.assertEqual(len(run.call_args_list), 3)
+        self.assertFalse(any(call.args[0][0] == "/usr/sbin/spctl" for call in run.call_args_list))
 
     def test_platform_memory_and_disk_preflight_are_distinct(self) -> None:
         cases = [

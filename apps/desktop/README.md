@@ -41,7 +41,7 @@ My Scholar 是一个本地优先的跨平台学术 PDF 阅读器。它把 PDF �
 ### Electron 桌面版
 
 ```bash
-git clone git@github.com:ShiLong-CN/guzi-scholar.git
+git clone git@github.com:Chinese-Dragon-Li/Guzi-Scholar.git
 cd guzi-scholar/apps/desktop
 npm install
 npm run dev
