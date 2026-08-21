@@ -2070,6 +2070,89 @@ class ReflowTest(unittest.TestCase):
             handler.do_GET()
         self.assertEqual([item["id"] for item in responses[0]["providers"]], ["local-mineru", "remote-guzi"])
 
+    def test_provider_discovery_returns_candidates_and_provider_status(self) -> None:
+        handler = object.__new__(ScholarHandler)
+        responses: list[tuple[dict, HTTPStatus]] = []
+        handler._send_json = lambda payload, status=HTTPStatus.OK: responses.append((payload, status))
+        handler._send_error_json = lambda message, status=HTTPStatus.BAD_REQUEST, **kwargs: self.fail(
+            f"unexpected discovery error: {message} {status} {kwargs}"
+        )
+        result = {
+            "provider": {"id": "local-mineru", "state": "ready", "ready": True},
+            "candidates": [{"executable": "/opt/mineru/bin/mineru"}],
+            "candidate_count": 1,
+            "failures": [],
+            "auto_selected": True,
+            "selected": {"executable": "/opt/mineru/bin/mineru"},
+        }
+        provider = MagicMock()
+        provider.discover_external.return_value = result
+        registry = MagicMock()
+        registry.get.return_value = provider
+        with patch.object(server_module, "STORE", None), patch.object(
+            server_module, "PARSING_INSTALL_THREAD", None
+        ), patch.object(server_module, "_parsing_provider_registry", return_value=registry):
+            handler._discover_provider_external("local-mineru")
+        self.assertEqual(responses, [(result, HTTPStatus.OK)])
+        provider.discover_external.assert_called_once_with()
+
+    def test_provider_select_uses_explicit_external_path_synchronously(self) -> None:
+        handler = object.__new__(ScholarHandler)
+        body = json.dumps({"path": "/opt/mineru"}).encode("utf-8")
+        handler.headers = {"Content-Length": str(len(body))}
+        handler.rfile = io.BytesIO(body)
+        responses: list[tuple[dict, HTTPStatus]] = []
+        handler._send_json = lambda payload, status=HTTPStatus.OK: responses.append((payload, status))
+        handler._send_error_json = lambda message, status=HTTPStatus.BAD_REQUEST, **kwargs: self.fail(
+            f"unexpected select error: {message} {status} {kwargs}"
+        )
+        provider = MagicMock()
+        provider.capability.return_value = {"id": "local-mineru", "can_import": True}
+        provider.select_external.return_value = {"id": "local-mineru", "state": "ready", "ready": True}
+        registry = MagicMock()
+        registry.get.return_value = provider
+        with patch.object(server_module, "STORE", None), patch.object(
+            server_module, "PARSING_INSTALL_THREAD", None
+        ), patch.object(server_module, "_parsing_provider_registry", return_value=registry):
+            handler._select_provider_external("local-mineru")
+        self.assertTrue(responses[0][0]["provider"]["ready"])
+        provider.select_external.assert_called_once_with(Path("/opt/mineru"))
+
+    def test_provider_discovery_rejects_an_active_component_operation(self) -> None:
+        handler = object.__new__(ScholarHandler)
+        errors: list[tuple[str, HTTPStatus, dict]] = []
+        handler._send_json = lambda *_args, **_kwargs: self.fail("unexpected discovery success")
+        handler._send_error_json = lambda message, status=HTTPStatus.BAD_REQUEST, **kwargs: errors.append(
+            (message, status, kwargs)
+        )
+        provider = MagicMock()
+        registry = MagicMock()
+        registry.get.return_value = provider
+        active_thread = MagicMock()
+        active_thread.is_alive.return_value = True
+        with patch.object(server_module, "STORE", None), patch.object(
+            server_module, "PARSING_INSTALL_THREAD", active_thread
+        ), patch.object(server_module, "_parsing_provider_registry", return_value=registry):
+            handler._discover_provider_external("local-mineru")
+        self.assertEqual(errors[0][1], HTTPStatus.CONFLICT)
+        self.assertEqual(errors[0][2]["code"], "busy")
+        provider.discover_external.assert_not_called()
+
+    def test_post_routes_dispatch_external_discovery_and_selection(self) -> None:
+        discover = object.__new__(ScholarHandler)
+        discover.path = "/api/parsing/providers/local-mineru/discover"
+        discovered: list[str] = []
+        discover._discover_provider_external = lambda provider_id: discovered.append(provider_id)
+        discover.do_POST()
+
+        select = object.__new__(ScholarHandler)
+        select.path = "/api/parsing/providers/local-mineru/select"
+        selected: list[str] = []
+        select._select_provider_external = lambda provider_id: selected.append(provider_id)
+        select.do_POST()
+        self.assertEqual(discovered, ["local-mineru"])
+        self.assertEqual(selected, ["local-mineru"])
+
     def test_provider_install_rejects_unpublished_artifact_without_starting_thread(self) -> None:
         handler = object.__new__(ScholarHandler)
         errors: list[tuple[str, HTTPStatus, dict]] = []
@@ -2093,6 +2176,29 @@ class ReflowTest(unittest.TestCase):
         provider.install.assert_not_called()
         self.assertEqual(errors[0][1], HTTPStatus.PRECONDITION_REQUIRED)
         self.assertEqual(errors[0][2]["code"], "artifact_unavailable")
+
+    def test_provider_import_starts_only_for_explicit_component_directory(self) -> None:
+        handler = object.__new__(ScholarHandler)
+        body = json.dumps({"path": "/tmp/mineru-component"}).encode("utf-8")
+        handler.headers = {"Content-Length": str(len(body))}
+        handler.rfile = io.BytesIO(body)
+        responses: list[tuple[dict, HTTPStatus]] = []
+        handler._send_json = lambda payload, status=HTTPStatus.OK: responses.append((payload, status))
+        handler._send_error_json = lambda message, status=HTTPStatus.BAD_REQUEST, **kwargs: self.fail(f"unexpected import error: {message} {status} {kwargs}")
+        provider = MagicMock()
+        provider.capability.return_value = {"id": "local-mineru", "ready": False, "can_import": True, "state": "artifact_unavailable"}
+        registry = MagicMock()
+        registry.get.return_value = provider
+        thread = MagicMock()
+        with patch.object(server_module, "STORE", None), patch.object(server_module, "PARSING_INSTALL_THREAD", None), patch.object(
+            server_module, "_parsing_provider_registry", return_value=registry
+        ), patch.object(server_module.threading, "Thread", return_value=thread) as thread_factory:
+            handler._start_provider_import("local-mineru")
+        self.assertEqual(responses[0][1], HTTPStatus.ACCEPTED)
+        self.assertEqual(responses[0][0]["provider"]["state"], "importing")
+        thread_factory.assert_called_once()
+        self.assertEqual(thread_factory.call_args.kwargs["args"], ("local-mineru", Path("/tmp/mineru-component")))
+        thread.start.assert_called_once()
 
     def test_start_reflow_rejects_missing_incomplete_and_readonly_jobs(self) -> None:
         with tempfile.TemporaryDirectory(prefix="my-scholar-reflow-boundary-") as temp:

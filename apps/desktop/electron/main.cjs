@@ -24,7 +24,7 @@ const { consumeInstallationMarker, requestMacInstallation } = require('./macos-i
 
 const PRODUCT_NAME = '谷子学术';
 const UPDATE_CHANNEL = 'internal';
-const UPDATE_MANIFEST_URL = process.env.MY_SCHOLAR_UPDATE_MANIFEST_URL || 'https://raw.githubusercontent.com/ShiLong-CN/guzi-scholar/main/release-manifests/macos-arm64.json';
+const UPDATE_MANIFEST_URL = process.env.MY_SCHOLAR_UPDATE_MANIFEST_URL || 'https://raw.githubusercontent.com/Chinese-Dragon-Li/Guzi-Scholar/main/release-manifests/macos-arm64.json';
 const UPDATE_ALLOWED_ORIGINS = Object.freeze(['https://raw.githubusercontent.com', 'https://github.com']);
 const defaultUserDataPath = app.getPath('userData');
 app.setName(PRODUCT_NAME);
@@ -78,6 +78,18 @@ ipcMain.handle('my-scholar:choose-library-location', (event) => {
   if (libraryMigrationPromise) throw new Error('文献库正在迁移，请等待当前操作完成。');
   libraryMigrationPromise = chooseAndMigrateLibrary().finally(() => { libraryMigrationPromise = null; });
   return libraryMigrationPromise;
+});
+
+ipcMain.handle('my-scholar:choose-mineru-component', async (event) => {
+  requireMainWindowSender(event);
+  const selection = await dialog.showOpenDialog(mainWindow, {
+    title: '选择已有版面引擎目录',
+    buttonLabel: '选择并复用',
+    properties: ['openDirectory'],
+    message: '请选择包含 bin/mineru 或 mineru 可执行文件的 Python 环境目录。谷子学术只会校验并保存路径，不会复制或删除原环境。',
+  });
+  if (selection.canceled || !selection.filePaths.length) return { ok: true, cancelled: true };
+  return { ok: true, cancelled: false, path: selection.filePaths[0] };
 });
 
 ipcMain.handle('my-scholar:get-startup-context', (event) => {
@@ -618,6 +630,7 @@ async function startServer() {
       MY_SCHOLAR_DATA_DIR: storage.stateDir,
       MY_SCHOLAR_LIBRARY_DIR: storage.currentPath,
       MY_SCHOLAR_COMPONENTS_DIR: path.join(app.getPath('userData'), 'components'),
+      MY_SCHOLAR_PACKAGED: app.isPackaged ? '1' : '0',
       MY_SCHOLAR_MIGRATION_TOKEN: migrationControlToken,
       MY_SCHOLAR_API_TOKEN: apiAccessToken,
       MY_SCHOLAR_BACKEND: process.env.MY_SCHOLAR_BACKEND || 'auto',

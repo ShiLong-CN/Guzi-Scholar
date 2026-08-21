@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,6 +14,7 @@ from component_manager import (
     ComponentManifest,
     PRODUCTION_COMPONENT_CATALOG,
 )
+from mineru_discovery import MineruCandidate, discover_mineru, discover_mineru_candidates
 from pipeline import process_pdf
 
 
@@ -95,17 +97,18 @@ class LocalMineruProvider:
         manager: ComponentManager,
         *,
         health_check: Optional[Callable[[Path], Optional[str]]] = None,
+        project_root: Optional[Path] = None,
     ) -> None:
         self.manager = manager
         self.health_check = health_check
+        self.project_root = Path(project_root or Path(__file__).resolve().parent).expanduser().resolve()
 
     def _manifest(self) -> Optional[ComponentManifest]:
         return self.manager.manifest_for("mineru")
 
-    def status(self) -> Dict[str, Any]:
-        manifest = self._manifest()
+    def _base_status(self) -> Dict[str, Any]:
         metadata = self.manager.component_metadata("mineru")
-        base = {
+        return {
             "id": self.provider_id,
             "kind": self.kind,
             "type": self.kind,
@@ -113,23 +116,103 @@ class LocalMineruProvider:
             "version": str(metadata.get("version") or ""),
             "model_version": str(metadata.get("model_version") or ""),
             "requirements": dict(metadata.get("requirements") or {}),
+            "install_help_url": str(metadata.get("install_help_url") or ""),
         }
+
+    def _external_status(self, candidate: MineruCandidate) -> Dict[str, Any]:
+        return {
+            **self._base_status(),
+            "state": "ready",
+            "reason_code": "ready",
+            "ready": True,
+            "installed": True,
+            "version": candidate.version,
+            "source": candidate.source,
+            "external": True,
+            "executable": str(candidate.executable),
+            "can_install": False,
+            "can_import": True,
+            "discovery": {"state": "found", "source": candidate.source, **candidate.to_dict()},
+        }
+
+    def _external_candidate(self) -> tuple[Optional[MineruCandidate], Optional[Any]]:
+        if hasattr(self.manager, "external_candidate_status"):
+            persisted, status = self.manager.external_candidate_status("mineru")
+            if persisted or status:
+                return persisted, status
+        else:
+            persisted = self.manager.external_candidate("mineru")
+            if persisted:
+                return persisted, None
+        return discover_mineru(project_root=self.project_root)
+
+    def status(self) -> Dict[str, Any]:
+        manifest = self._manifest()
+        base = self._base_status()
         if manifest is None:
+            external, external_failure = self._external_candidate()
+            if external:
+                return self._external_status(external)
+            operation = self.manager.operation_status("mineru") if hasattr(self.manager, "operation_status") else None
+            if operation:
+                return {
+                    **base,
+                    **operation,
+                    "reason_code": str(operation.get("state") or "importing"),
+                    "can_install": False,
+                    "can_import": True,
+                    "discovery": self.manager.discovery_status("mineru"),
+                }
+            outcome = self.manager.last_outcome("mineru") if hasattr(self.manager, "last_outcome") else None
+            if outcome:
+                return {
+                    **base,
+                    **outcome,
+                    "reason_code": str(outcome.get("reason_code") or outcome.get("state") or "failed"),
+                    "can_install": False,
+                    "can_import": True,
+                    "discovery": self.manager.discovery_status("mineru"),
+                    "message": str(outcome.get("error") or "本地版面引擎导入失败。"),
+                }
+            if isinstance(external_failure, Mapping):
+                return {
+                    **base,
+                    **dict(external_failure),
+                    "ready": False,
+                    "external": True,
+                    "can_install": False,
+                    "can_import": True,
+                    "discovery": {"state": "invalid", **dict(external_failure)},
+                }
             return {
                 **base,
                 "state": "artifact_unavailable",
                 "reason_code": "artifact_unavailable",
                 "can_install": False,
-                "message": "本地版面引擎 artifact 尚未提供。",
+                "can_import": True,
+                "discovery": self.manager.discovery_status("mineru"),
+                "message": f"未发现可复用的本地版面引擎；当前版本也没有可下载 artifact。{str(external_failure or '')}",
             }
         status = self.manager.status(manifest)
         result = {
             **base,
             **status,
-            "can_install": status.get("state") in {"not_installed", "update_available", "failed", "cancelled"},
+            "can_install": not manifest.local_only and status.get("state") in {"not_installed", "update_available", "failed", "cancelled"},
+            "can_import": True,
+            "source": "local-import" if manifest.local_only else "managed-download",
         }
         if status.get("state") == "ready":
             executable = self.manager.executable_path(manifest)
+            if manifest.local_only:
+                signature_failure = self.manager.signature_verifier(executable, manifest)
+                if signature_failure:
+                    return {
+                        **result,
+                        "state": "signature_verification_failed",
+                        "reason_code": "signature_verification_failed",
+                        "message": str(signature_failure),
+                        "ready": False,
+                    }
             failure = self.health_check(executable) if self.health_check else self.manager.executable_health_check(executable, manifest)
             if failure:
                 return {
@@ -166,10 +249,60 @@ class LocalMineruProvider:
     def cancel_install(self) -> bool:
         return self.manager.cancel_install()
 
+    def discover_external(self) -> Dict[str, Any]:
+        candidates, failures = discover_mineru_candidates(
+            project_root=self.project_root,
+            explicit_scan=True,
+        )
+        persisted, persisted_status = self.manager.external_candidate_status("mineru")
+        if persisted and all(candidate.executable != persisted.executable for candidate in candidates):
+            candidates.insert(0, persisted)
+        elif persisted_status and persisted_status.get("state") != "ready":
+            failures.append(dict(persisted_status))
+        selected: Optional[MineruCandidate] = None
+        if len(candidates) == 1:
+            selected = candidates[0]
+            provider = self.select_external(selected.executable)
+        else:
+            provider = self.status()
+        return {
+            "provider": provider,
+            "candidates": [candidate.to_dict() for candidate in candidates],
+            "candidate_count": len(candidates),
+            "failures": [dict(failure) for failure in failures],
+            "auto_selected": selected is not None,
+            "selected": selected.to_dict() if selected else None,
+        }
+
+    def select_external(self, source: Path) -> Dict[str, Any]:
+        source = Path(source).expanduser()
+        executable = source if source.is_file() else next(
+            (candidate for candidate in (source / "bin" / "mineru", source / "mineru") if candidate.is_file()),
+            source,
+        )
+        try:
+            candidate = self.manager.configure_external("mineru", executable)
+        except ComponentError as exc:
+            raise _provider_error(exc) from exc
+        return self._external_status(candidate)
+
+    def import_existing(self, source: Path, progress: Optional[ProgressCallback] = None) -> Dict[str, Any]:
+        source = Path(source).expanduser()
+        if source.is_file() or not (source / "component.json").is_file():
+            return self.select_external(source)
+        try:
+            return self.manager.import_existing("mineru", source, progress=progress)
+        except ComponentError as exc:
+            raise _provider_error(exc) from exc
+
     def remove(self) -> Dict[str, Any]:
         manifest = self._manifest()
         if manifest is None:
-            return {**self.status(), "removed": False}
+            try:
+                removed = self.manager.clear_external("mineru")
+            except ComponentError as exc:
+                raise _provider_error(exc) from exc
+            return {**self.status(), "removed": removed, "external_removed": removed}
         try:
             result = self.manager.remove(manifest)
         except ComponentError as exc:
@@ -192,7 +325,8 @@ class LocalMineruProvider:
                 details={"provider": capability},
             )
         manifest = self._manifest()
-        if manifest is None:
+        external = None if manifest else self._external_candidate()[0]
+        if manifest is None and external is None:
             raise ProviderError("本地版面引擎 artifact 尚未提供。", code="artifact_unavailable")
         if cancel_event is not None and cancel_event.is_set():
             raise ProviderError("AI 重排已取消。", code="cancelled")
@@ -205,8 +339,8 @@ class LocalMineruProvider:
                 source_name=parsed.source_name,
                 progress=progress,
                 backend_override="layout",
-                layout_executable=self.manager.executable_path(manifest),
-                layout_runtime_root=self.manager.target_dir(manifest),
+                layout_executable=self.manager.executable_path(manifest) if manifest else external.executable,
+                layout_runtime_root=self.manager.target_dir(manifest) if manifest else None,
                 cancel_event=cancel_event,
             )
         except Exception as exc:
@@ -217,8 +351,8 @@ class LocalMineruProvider:
             manifest=dict(result),
             metrics={
                 "provider_id": self.provider_id,
-                "component_version": manifest.version,
-                "model_version": manifest.model_version,
+                "component_version": manifest.version if manifest else external.version or "external",
+                "model_version": manifest.model_version if manifest else None,
                 "seconds": round(time.perf_counter() - started, 3),
             },
         )
@@ -299,7 +433,11 @@ def create_default_registry(
         executable_health_check=component_health_check,
     )
     return ParsingProviderRegistry([
-        LocalMineruProvider(manager, health_check=health_check),
+        LocalMineruProvider(
+            manager,
+            health_check=health_check,
+            project_root=Path(os.environ.get("MY_SCHOLAR_PROJECT_ROOT") or Path(__file__).resolve().parent),
+        ),
         RemoteGuziProvider(),
     ])
 

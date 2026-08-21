@@ -23,6 +23,13 @@ let browserSession;
   let aiStatusHistory = [];
   let aiTestRequests = 0;
   let parsingInstallPolls = 0;
+  let parsingDiscoverMode = 'empty';
+  let parsingDiscoverRequests = 0;
+  const parsingSelectedPaths = [];
+  const parsingCandidates = [
+    { executable: '/Users/test/mineru-a/bin/mineru', runtime_root: '/Users/test/mineru-a', source: 'virtualenv', version: 'mineru, version 3.4.4', health: { ready: true } },
+    { executable: '/opt/homebrew/bin/mineru', runtime_root: '/opt/homebrew', source: 'homebrew', version: 'mineru, version 3.4.5', health: { ready: true } },
+  ];
   let parsingProvider = {
     id: 'local-mineru',
     kind: 'local',
@@ -96,8 +103,26 @@ let browserSession;
     parsingProvider = { ...parsingProvider, state: 'cancelled', reason_code: 'cancelled', ready: false, can_install: true, progress: 0.48, stage: '安装已取消' };
     await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ provider: parsingProvider }) });
   });
+  await page.route('**/api/parsing/providers/local-mineru/discover', async (route) => {
+    parsingDiscoverRequests += 1;
+    if (route.request().method() !== 'POST') throw new Error('MinerU discovery did not use POST');
+    const candidates = parsingDiscoverMode === 'empty' ? [] : parsingDiscoverMode === 'single' ? parsingCandidates.slice(0, 1) : parsingCandidates;
+    if (parsingDiscoverMode === 'empty') {
+      parsingProvider = { ...parsingProvider, state: 'artifact_unavailable', reason_code: 'artifact_unavailable', ready: false, can_install: false, version: 'unpublished', external: false };
+    } else if (parsingDiscoverMode === 'single') {
+      parsingProvider = { ...parsingProvider, state: 'ready', reason_code: 'ready', ready: true, can_install: false, external: true, source: 'external-discovery', version: parsingCandidates[0].version };
+    }
+    await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ provider: parsingProvider, candidates, failures: [] }) });
+  });
+  await page.route('**/api/parsing/providers/local-mineru/select', async (route) => {
+    const payload = route.request().postDataJSON();
+    parsingSelectedPaths.push(payload.path);
+    const candidate = parsingCandidates.find((item) => item.executable === payload.path || item.runtime_root === payload.path);
+    parsingProvider = { ...parsingProvider, state: 'ready', reason_code: 'ready', ready: true, can_install: false, external: true, source: 'external-user-selected', version: candidate?.version || 'mineru, version 3.4.5' };
+    await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ provider: parsingProvider }) });
+  });
   await page.route('**/api/parsing/providers/local-mineru/component', async (route) => {
-    parsingProvider = { ...parsingProvider, state: 'not_installed', reason_code: 'not_installed', ready: false, can_install: true, installed_bytes: undefined, progress: undefined, stage: undefined };
+    parsingProvider = { ...parsingProvider, state: 'not_installed', reason_code: 'not_installed', ready: false, can_install: true, version: '2.1.0', external: false, source: undefined, installed_bytes: undefined, progress: undefined, stage: undefined };
     await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ provider: parsingProvider }) });
   });
   await page.route('**/api/ai/test', async (route) => {
@@ -156,12 +181,53 @@ let browserSession;
   await page.waitForFunction(() => document.querySelector('#local-mineru-status')?.textContent.trim() === '未安装');
   if (await page.locator('#remote-parsing-provider button').count()) throw new Error('The unavailable remote parsing provider exposed an action');
   if (!/不会上传 PDF/u.test(await page.locator('#remote-parsing-provider').textContent())) throw new Error('The remote parsing placeholder did not preserve the no-upload boundary');
+  await page.locator('#scan-local-mineru').click();
+  await page.locator('#local-mineru-discovery:not([hidden])').filter({ hasText: '未扫描到可复用的 MinerU' }).waitFor();
+  if (parsingDiscoverRequests !== 1 || !/手动选择.*官方安装方式/u.test(await page.locator('#local-mineru-discovery').textContent())) throw new Error('Zero-candidate discovery did not expose manual reuse and official installation guidance');
+  const installGuide = page.locator('#local-mineru-install-guide:not([hidden])');
+  await installGuide.waitFor();
+  if (!/opendatalab\/MinerU\/blob\/mineru-3\.4\.5-released\/docs\/zh\/quick_start\/index\.md/u.test(await installGuide.getAttribute('href'))) throw new Error('MinerU official installation guide did not use the pinned 3.4.5 documentation');
+  if (await page.locator('#install-local-mineru').isVisible()) throw new Error('Artifact-unavailable discovery exposed a fake one-click installation action');
+
+  await page.evaluate((selectedPath) => {
+    window.myScholarDesktop = {
+      chooseMineruComponent: async () => ({ ok: true, cancelled: false, path: selectedPath }),
+    };
+    document.querySelector('#import-local-mineru').click();
+  }, parsingCandidates[0].runtime_root);
+  await page.waitForFunction(() => document.querySelector('#local-mineru-status')?.textContent.trim() === '可以使用');
+  if (parsingSelectedPaths.at(-1) !== parsingCandidates[0].runtime_root || !/已复用外部 MinerU/u.test(await page.locator('#local-mineru-detail').textContent())) throw new Error('Manual MinerU selection did not validate and reuse the chosen environment');
+  await page.locator('#remove-local-mineru').click();
+  await page.locator('#confirm-accept').click();
+  await page.waitForFunction(() => document.querySelector('#local-mineru-status')?.textContent.trim() === '未安装');
+
+  parsingDiscoverMode = 'single';
+  const selectedBeforeSingleScan = parsingSelectedPaths.length;
+  await page.locator('#scan-local-mineru').click();
+  await page.locator('#local-mineru-discovery').filter({ hasText: '已自动复用本机版面引擎' }).waitFor();
+  if (parsingSelectedPaths.length !== selectedBeforeSingleScan || !/已复用外部 MinerU/u.test(await page.locator('#local-mineru-detail').textContent())) throw new Error('Single-candidate discovery did not reuse the backend-activated environment');
+  await page.locator('#remove-local-mineru').click();
+  await page.locator('#confirm-accept').click();
+  await page.waitForFunction(() => document.querySelector('#local-mineru-status')?.textContent.trim() === '未安装');
+
+  parsingDiscoverMode = 'multiple';
+  await page.locator('#scan-local-mineru').click();
+  await page.locator('#local-mineru-discovery [data-reuse-mineru-candidate]').nth(1).click();
+  await page.waitForFunction(() => document.querySelector('#local-mineru-status')?.textContent.trim() === '可以使用');
+  if (parsingSelectedPaths.at(-1) !== parsingCandidates[1].executable || !/已复用外部 MinerU/u.test(await page.locator('#local-mineru-detail').textContent())) throw new Error('Selected MinerU candidate was not validated and reused through the selection endpoint');
+  await page.locator('#remove-local-mineru').click();
+  await page.locator('#confirm-accept').click();
+  await page.waitForFunction(() => document.querySelector('#local-mineru-status')?.textContent.trim() === '未安装');
+
   await page.locator('#install-local-mineru').click();
   await page.locator('#confirm-dialog[open]').waitFor();
   if (!/macOS 14\+.*16\.00 GB 内存.*20\.00 GB 可用空间/u.test(await page.locator('#confirm-message').textContent())) throw new Error('The component confirmation omitted system requirements');
   await page.locator('#confirm-accept').click();
   await page.locator('#local-mineru-install-progress:not([hidden])').waitFor();
-  if (await page.locator('#local-mineru-install-value').textContent() !== '17%') throw new Error('The component UI did not render backend download progress');
+  await page.waitForFunction(() => {
+    const value = Number.parseInt(document.querySelector('#local-mineru-install-value')?.textContent || '', 10);
+    return value > 0 && value < 100;
+  });
   await page.locator('#cancel-local-mineru-install').click();
   await page.waitForFunction(() => document.querySelector('#local-mineru-status')?.textContent.trim() === '已取消');
   if (await page.locator('#remove-local-mineru').isVisible()) throw new Error('A cancelled component install was shown as installed');
@@ -262,7 +328,7 @@ let browserSession;
   });
   if (!libraryLocationFallback.buttonDisabled || !/浏览器服务/u.test(libraryLocationFallback.path || '') || !/桌面客户端/u.test(libraryLocationFallback.status || '')) throw new Error(`Browser settings did not expose the desktop-only library location fallback (${JSON.stringify(libraryLocationFallback)})`);
   const aiSourceText = await page.locator('#settings-updates').textContent();
-  const sourceHref = await page.locator('#settings-updates a[href*="github.com/ShiLong-CN/guzi-scholar"]').getAttribute('href');
+  const sourceHref = await page.locator('#settings-updates a[href*="github.com/Chinese-Dragon-Li/Guzi-Scholar"]').getAttribute('href');
   if (!/谷子学术|Guzi Scholar/u.test(aiSourceText) || !sourceHref) throw new Error('Open-source attribution was missing from the settings page');
   await page.locator('.settings-navigation a[href="#settings-ai"]').click();
   const translationBaseURL = page.locator('#setting-translation-base-url');

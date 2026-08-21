@@ -205,6 +205,19 @@ class LayoutPipelineTest(unittest.TestCase):
             ):
                 self.assertEqual(_pdf_tools_root(), tools_root.resolve())
 
+    def test_pdf_tools_root_supports_shared_apps_desktop_layout(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            workspace = Path(temp)
+            project_root = workspace / "guzi-scholar" / "apps" / "desktop"
+            tools_root = workspace / "pdf-tools"
+            project_root.mkdir(parents=True)
+            tools_root.mkdir()
+            with patch("layout_pipeline.PROJECT_ROOT", project_root), patch.dict(
+                os.environ,
+                {"MY_SCHOLAR_TOOLCHAIN_ROOT": ""},
+            ):
+                self.assertEqual(_pdf_tools_root(), tools_root.resolve())
+
     def test_partial_fitz_page_render_is_discarded_when_fallback_is_unavailable(self) -> None:
         class FakePixmap:
             def save(self, path: str) -> None:

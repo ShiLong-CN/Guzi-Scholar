@@ -36,6 +36,7 @@ def toolchain_roots(
         [
             project_root.parent,
             project_root.parent.parent,
+            project_root.parent.parent.parent,
             project_root,
         ]
     )

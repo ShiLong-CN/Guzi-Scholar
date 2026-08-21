@@ -70,7 +70,7 @@ assert.strictEqual(manifest.build?.productName, '谷子学术');
 assert.strictEqual(manifest.build?.directories?.output, 'dist/mac.noindex');
 assert.strictEqual(manifest.build?.mac?.extendInfo?.CFBundleDisplayName, '谷子学术');
 assert.strictEqual(manifest.build?.mac?.extendInfo?.CFBundleName, '谷子学术');
-assert.strictEqual(manifest.version, '0.1.2');
+assert.strictEqual(manifest.version, '0.1.3');
 assert.strictEqual(manifest.build?.afterPack, 'scripts/after-pack.cjs');
 assert.match(manifest.scripts?.['pack:mac'] || '', /prepare:mac/u);
 assert.match(manifest.scripts?.['dist:mac'] || '', /prepare:mac/u);
@@ -147,6 +147,7 @@ assert.match(mainSource, /python-server[\s\S]*ca-certificates\.crt[\s\S]*SSL_CER
 assert.match(mainSource, /stats\.isFile\(\) && stats\.size > 0/u);
 assert.match(mainSource, /MY_SCHOLAR_PROJECT_ROOT: projectRoot/u);
 assert.match(mainSource, /MY_SCHOLAR_COMPONENTS_DIR: path\.join\(app\.getPath\('userData'\), 'components'\)/u);
+assert.match(mainSource, /MY_SCHOLAR_PACKAGED: app\.isPackaged \? '1' : '0'/u);
 assert.match(mainSource, /UPDATE_CHANNEL = 'internal'/u);
 assert.match(mainSource, /requestMacInstallation\(\{ app, dialog \}\)/u);
 assert.match(mainSource, /consumeInstallationMarker\(\{ app \}\)/u);
@@ -167,10 +168,12 @@ if (packagedApp) {
   const resourcesRoot = path.join(packagedAppRoot, 'Contents', 'Resources');
   assert.ok(fs.statSync(resourcesRoot).isDirectory(), 'the packaged app Resources directory must exist');
   assert.strictEqual(fs.existsSync(path.join(resourcesRoot, 'components')), false, 'managed components must stay in userData, outside the app bundle');
-  for (const relative of ['app/component_manager.py', 'app/parsing_providers.py']) {
+  for (const relative of ['app/component_manager.py', 'app/mineru_discovery.py', 'app/parsing_providers.py']) {
     assert.ok(fs.statSync(path.join(resourcesRoot, relative)).isFile(), `${relative} is missing from the packaged app`);
   }
-  const forbidden = walkFiles(resourcesRoot).filter((relative) => /mineru|\.safetensors$|\.onnx$|\.ckpt$|\.pth$/iu.test(relative));
+  const forbidden = walkFiles(resourcesRoot).filter((relative) =>
+    /(^|\/)(?:mineru(?:\/|$)|models?(?:\/|$))|\.(?:safetensors|onnx|ckpt|pth)$/iu.test(relative),
+  );
   assert.deepStrictEqual(forbidden, [], `the default app bundle contains managed runtime/model files: ${forbidden.join(', ')}`);
   const packagedBytes = walkFiles(packagedAppRoot).reduce((total, relative) => total + fs.lstatSync(path.join(packagedAppRoot, relative)).size, 0);
   assert.ok(packagedBytes <= 512 * 1024 * 1024, `the default app bundle exceeded the 512 MiB size budget (${packagedBytes} bytes)`);
@@ -205,6 +208,7 @@ if (packagedApp) {
         MY_SCHOLAR_DATA_DIR: stateDir,
         MY_SCHOLAR_LIBRARY_DIR: libraryDir,
         MY_SCHOLAR_COMPONENTS_DIR: componentsDir,
+        MY_SCHOLAR_PACKAGED: '1',
       },
     });
     const dependencyStatus = JSON.parse(dependency.stdout.trim().split(/\r?\n/u).at(-1));

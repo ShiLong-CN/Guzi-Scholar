@@ -9202,8 +9202,10 @@
     });
   });
 
-  const parsingInstallStates = new Set(['preparing', 'checking', 'downloading', 'verifying', 'publishing', 'installing', 'cancelling']);
+  const parsingInstallStates = new Set(['preparing', 'checking', 'downloading', 'verifying', 'publishing', 'installing', 'importing', 'cancelling']);
   let currentLocalMinerUProvider = null;
+  let currentLocalMinerUCandidates = [];
+  let currentLocalMinerUDiscoveryState = 'idle';
   let parsingProvidersRequest = 0;
   let parsingInstallPromise = null;
 
@@ -9285,7 +9287,7 @@
   function actionableParsingMessage(code, details = {}, fallback = '') {
     const messages = {
       not_installed: 'AI 重排需要本地版面引擎。确认系统要求后可一键安装。',
-      artifact_unavailable: '当前版本尚未提供适用于此设备的安装包，请等待后续版本。',
+      artifact_unavailable: '未发现可复用的本地版面引擎。你可以扫描本机、选择已有环境，或查看 MinerU 官方安装方式。',
       unsupported_platform: '本地版面引擎首期仅支持 macOS Apple Silicon。',
       unsupported_arch: '本地版面引擎首期仅支持 Apple Silicon Mac。',
       unsupported_os: `系统版本不兼容，需要 macOS ${details.min_macos || details.minimum_macos || '14'} 或更高版本。`,
@@ -9298,12 +9300,14 @@
       checksum_mismatch: '组件校验失败，未安装任何未校验内容。请重新下载。',
       corrupt: '本地组件不完整或已损坏，请删除后重新安装。',
       component_unhealthy: '本地组件未通过运行检查，请删除后重新安装。',
+      signature_verification_failed: '本地组件签名未通过校验，无法安全使用。请重新选择并验证受信任的组件。',
       install_conflict: '组件目录存在未通过校验的内容，请先删除组件再重新安装。',
       remove_failed: '组件卸载失败，受管组件仍保留在原位置，请稍后重试。',
       remove_cleanup_failed: '组件已停止使用，但旧版本临时文件清理失败；谷子学术会在下次检测时重试。',
       cancelled: '安装已取消，临时文件将被清理。',
       disabled: '本地版面引擎已停用，AI 重排当前不可用。',
       not_configured: '解析服务尚未配置。',
+      invalid_external_component: '所选 MinerU 环境未通过验证，请确认目录中包含可执行的 bin/mineru 及完整 Python 环境。',
     };
     return messages[code] || fallback || '版面引擎暂不可用，请稍后重试。';
   }
@@ -9322,9 +9326,9 @@
     const statusLabels = {
       ready: '可以使用', update_available: '可更新', not_installed: '未安装', artifact_unavailable: '暂无安装包',
       unsupported_platform: '不兼容', unsupported_arch: '不兼容', unsupported_os: '不兼容', insufficient_memory: '资源不足',
-      insufficient_disk: '空间不足', corrupt: '需要修复', failed: '安装失败', cancelled: '已取消', disabled: '已停用',
+      insufficient_disk: '空间不足', corrupt: '需要修复', signature_verification_failed: '签名无效', failed: '安装失败', cancelled: '已取消', disabled: '已停用',
       preparing: '准备中', checking: '检测中', downloading: '下载中', verifying: '校验中', publishing: '安装中',
-      installing: '安装中', cancelling: '正在取消', unknown: '状态未知',
+      installing: '安装中', importing: '验证中', cancelling: '正在取消', unknown: '状态未知',
     };
     const label = statusLabels[status] || '暂不可用';
     const statusNode = $('#local-mineru-status');
@@ -9333,13 +9337,13 @@
       statusNode.className = `ai-service-status ${status === 'ready' ? 'is-ready' : busy ? 'is-loading' : ['not_installed', 'unknown', 'cancelled'].includes(status) ? 'is-unknown' : 'is-unavailable'}`;
     }
     card.classList.remove('is-loading', 'is-ready', 'is-installing', 'is-error', 'is-disabled', 'is-idle');
-    card.classList.add(status === 'ready' ? 'is-ready' : busy ? 'is-installing' : ['failed', 'corrupt', 'checksum_mismatch'].includes(status) ? 'is-error' : status === 'disabled' ? 'is-disabled' : 'is-idle');
+    card.classList.add(status === 'ready' ? 'is-ready' : busy ? 'is-installing' : ['failed', 'corrupt', 'checksum_mismatch', 'signature_verification_failed', 'invalid_local_component'].includes(status) ? 'is-error' : status === 'disabled' ? 'is-disabled' : 'is-idle');
 
     const declaredVersion = String(provider.version || '');
     const installedVersion = component.version || provider.installed_version || (installed ? declaredVersion : '');
     const targetVersion = provider.latest_version || provider.target_version || provider.artifact?.version || (!installed ? declaredVersion : '');
     $('#local-mineru-version').textContent = installedVersion
-      ? `v${installedVersion}${hasUpdate && targetVersion ? ` → v${targetVersion}` : ''}`
+      ? `${provider.external ? installedVersion : `v${installedVersion}`}${hasUpdate && targetVersion ? ` → v${targetVersion}` : ''}`
       : targetVersion && targetVersion !== 'unpublished' ? `待安装 v${targetVersion}` : targetVersion === 'unpublished' ? '尚未发布' : '未安装';
     const diskBytes = Number(component.disk_bytes || component.size_bytes || provider.installed_bytes || provider.disk_bytes || provider.disk_usage_bytes || 0);
     const downloadBytes = Number(provider.artifact?.size_bytes || provider.download_bytes || provider.size_bytes || 0);
@@ -9361,23 +9365,38 @@
       ? ` 旧版本临时文件仍占用 ${formatBytes(provider.cleanup_pending_bytes || 0)}，谷子学术将在后续检测时重试清理。`
       : '';
     $('#local-mineru-detail').textContent = status === 'ready'
-      ? `本地版面引擎${installedVersion ? ` v${installedVersion}` : ''} 已通过能力检测，可用于 AI 重排。${cleanupWarning}`
+      ? `${provider.external ? provider.source === 'development-toolchain' ? '已复用开发环境 MinerU' : '已复用外部 MinerU' : `本地版面引擎${installedVersion ? ` v${installedVersion}` : ''}`}，已通过能力检测，可用于 AI 重排。${cleanupWarning}`
       : busy ? String(installation.stage || installation.message || '正在准备组件，请保持应用打开。')
         : actionableParsingMessage(detailCode, explicitError?.details || parsingDetails(provider), fallback);
 
     const installButton = $('#install-local-mineru');
     const cancelButton = $('#cancel-local-mineru-install');
     const removeButton = $('#remove-local-mineru');
+    const scanButton = $('#scan-local-mineru');
+    const importButton = $('#import-local-mineru');
+    const installGuide = $('#local-mineru-install-guide');
     const retryable = ['failed', 'cancelled'].includes(status);
     const blocked = new Set(['artifact_unavailable', 'unsupported_platform', 'unsupported_arch', 'unsupported_os', 'incompatible_os', 'insufficient_memory', 'insufficient_disk', 'disabled']);
     const installable = provider.installable !== false && (provider.can_install !== false || retryable) && !blocked.has(parsingProviderStatus(provider)) && !blocked.has(parsingErrorCode(provider));
     installButton.hidden = busy || (!installable && !hasUpdate) || (status === 'ready' && !hasUpdate);
     installButton.disabled = busy;
     installButton.textContent = hasUpdate ? '更新版面引擎' : ['failed', 'cancelled', 'corrupt'].includes(status) ? '重新安装' : '一键安装版面引擎';
-    cancelButton.hidden = !busy;
+    cancelButton.hidden = !busy || status === 'importing';
     cancelButton.disabled = status === 'cancelling';
-    removeButton.hidden = busy || !installed;
+    removeButton.hidden = busy || !installed || (provider.external && provider.source === 'development-toolchain');
     removeButton.disabled = busy;
+    removeButton.textContent = provider.external ? '停止复用' : '删除组件';
+    scanButton.hidden = false;
+    scanButton.disabled = busy;
+    importButton.hidden = busy || status === 'ready' || !isDesktopApp || provider.can_import === false;
+    importButton.disabled = busy;
+    const installHelpURL = String(provider.install_help_url || provider.catalog?.install_help_url || '').trim();
+    if (installGuide) {
+      installGuide.href = installHelpURL.startsWith('https://')
+        ? installHelpURL
+        : 'https://github.com/opendatalab/MinerU/blob/mineru-3.4.5-released/docs/zh/quick_start/index.md';
+      installGuide.hidden = currentLocalMinerUDiscoveryState !== 'empty' || busy || !installButton.hidden;
+    }
     return provider;
   }
 
@@ -9433,6 +9452,7 @@
     if (parsingInstallPromise) return parsingInstallPromise;
     const selected = provider || await fetchParsingProviders();
     if (!skipConfirmation && !await requestConfirmation(parsingInstallPrompt(selected), '安装本地版面引擎？')) return null;
+    renderLocalMinerUDiscovery();
     const optimistic = { ...selected, install: { ...parsingInstallation(selected), status: 'preparing', progress: 0, stage: '正在检查系统与磁盘空间' } };
     renderLocalMinerUProvider(optimistic);
     const operation = (async () => {
@@ -9471,14 +9491,173 @@
     }
   }
 
+  function parsingDiscoveryCandidates(payload = {}) {
+    const records = payload.candidates || payload.discovery?.candidates || payload.discovered || [];
+    return Array.isArray(records) ? records.filter((candidate) => candidate && typeof candidate === 'object') : [];
+  }
+
+  function parsingDiscoveryCandidatePath(candidate = {}) {
+    return String(candidate.executable || candidate.runtime_root || candidate.path || candidate.root || '').trim();
+  }
+
+  function parsingDiscoveryCandidateLabel(candidate = {}) {
+    const sourceLabels = {
+      path: '系统 PATH', homebrew: 'Homebrew', conda: 'Conda', virtualenv: 'Python 虚拟环境',
+      'development-toolchain': '开发工具链', 'user-selected': '用户目录', external: '外部环境',
+    };
+    const version = String(candidate.version || '').trim();
+    const source = String(candidate.source || '').trim().toLowerCase();
+    return [version, sourceLabels[source] || candidate.source || '本机环境'].filter(Boolean).join(' · ');
+  }
+
+  function renderLocalMinerUDiscovery({ state = 'idle', candidates = [], message = '' } = {}) {
+    const container = $('#local-mineru-discovery');
+    if (!container) return;
+    currentLocalMinerUDiscoveryState = state;
+    currentLocalMinerUCandidates = [...candidates];
+    container.replaceChildren();
+    container.hidden = state === 'idle';
+    const installGuide = $('#local-mineru-install-guide');
+    if (installGuide) installGuide.hidden = state !== 'empty' || !$('#install-local-mineru')?.hidden;
+    if (state === 'idle') return;
+
+    const addRecord = (title, detail, buttonText = '', candidateIndex = -1) => {
+      const record = document.createElement('div');
+      record.className = 'metadata-candidate';
+      record.setAttribute('role', 'listitem');
+      const heading = document.createElement('strong');
+      heading.textContent = title;
+      const description = document.createElement('span');
+      description.textContent = detail ? ` · ${detail}` : '';
+      record.append(heading, description);
+      if (buttonText) {
+        const button = document.createElement('button');
+        button.className = 'secondary-button compact-button';
+        button.type = 'button';
+        button.dataset.reuseMineruCandidate = String(candidateIndex);
+        button.textContent = buttonText;
+        record.append(button);
+      }
+      container.append(record);
+    };
+
+    if (state === 'scanning') {
+      addRecord('正在扫描本机', message || '正在验证可执行文件和 Python 环境');
+      return;
+    }
+    if (state === 'empty') {
+      addRecord('未扫描到可复用的 MinerU', message || ($('#install-local-mineru')?.hidden
+        ? '可手动选择已有环境，或查看 MinerU 官方安装方式'
+        : '可手动选择已有环境，或让谷子学术一键安装版面引擎'));
+      return;
+    }
+    if (state === 'reused') {
+      const candidate = candidates[0] || {};
+      addRecord('已自动复用本机版面引擎', [parsingDiscoveryCandidateLabel(candidate), parsingDiscoveryCandidatePath(candidate)].filter(Boolean).join(' · '));
+      return;
+    }
+    candidates.forEach((candidate, index) => {
+      addRecord(
+        parsingDiscoveryCandidatePath(candidate) || `MinerU 候选 ${index + 1}`,
+        parsingDiscoveryCandidateLabel(candidate),
+        '复用此环境',
+        index,
+      );
+    });
+  }
+
+  async function reuseLocalMinerUPath(path, { candidate = null, automatic = false } = {}) {
+    if (!path) throw new Error('版面引擎路径为空，无法验证。');
+    const provider = currentLocalMinerUProvider || {};
+    renderLocalMinerUProvider({ ...provider, state: 'importing', reason_code: 'importing', install: { status: 'importing', stage: '正在验证已有版面引擎', progress: 0 } });
+    try {
+      const accepted = await api('/api/parsing/providers/local-mineru/select', jsonOptions({ path }));
+      const completed = localMinerUFromPayload(accepted);
+      if (completed) renderLocalMinerUProvider(completed);
+      if (parsingProviderStatus(completed) === 'ready') {
+        if (candidate) renderLocalMinerUDiscovery({ state: 'reused', candidates: [candidate] });
+        else renderLocalMinerUDiscovery();
+        showToast(automatic ? '已扫描并自动复用本机版面引擎。' : '已有版面引擎已复用并通过验证。');
+      } else {
+        renderLocalMinerUProvider(completed || provider);
+      }
+      return completed;
+    } catch (error) {
+      renderLocalMinerUProvider(currentLocalMinerUProvider || provider, error);
+      throw error;
+    }
+  }
+
+  async function scanLocalMinerU() {
+    const button = $('#scan-local-mineru');
+    if (button) button.disabled = true;
+    renderLocalMinerUDiscovery({ state: 'scanning' });
+    try {
+      const payload = await api('/api/parsing/providers/local-mineru/discover', { method: 'POST' });
+      const candidates = parsingDiscoveryCandidates(payload);
+      let provider = localMinerUFromPayload(payload);
+      if (provider) renderLocalMinerUProvider(provider);
+      if (!candidates.length) {
+        renderLocalMinerUDiscovery({ state: 'empty' });
+        showToast($('#install-local-mineru')?.hidden
+          ? '未扫描到可复用的本地版面引擎，可手动选择已有环境或查看官方安装方式。'
+          : '未扫描到可复用的本地版面引擎，可手动选择已有环境或使用一键安装。', true);
+        return;
+      }
+      if (candidates.length === 1) {
+        if (parsingProviderStatus(provider || {}) !== 'ready') {
+          provider = await reuseLocalMinerUPath(parsingDiscoveryCandidatePath(candidates[0]), { candidate: candidates[0], automatic: true });
+        } else {
+          renderLocalMinerUDiscovery({ state: 'reused', candidates });
+          showToast('已扫描并自动复用本机版面引擎。');
+        }
+        if (parsingProviderStatus(provider || {}) !== 'ready') renderLocalMinerUDiscovery({ state: 'candidates', candidates });
+        return;
+      }
+      renderLocalMinerUDiscovery({ state: 'candidates', candidates });
+      showToast(`扫描到 ${candidates.length} 个可复用环境，请选择一个。`);
+    } catch (error) {
+      renderLocalMinerUProvider(currentLocalMinerUProvider || {}, error);
+      renderLocalMinerUDiscovery({ state: 'empty', message: error.message || '扫描失败，可手动选择已有环境或使用一键安装' });
+    } finally {
+      if (button) button.disabled = false;
+    }
+  }
+
+  async function importLocalMinerU() {
+    const desktop = window.myScholarDesktop;
+    if (typeof desktop?.chooseMineruComponent !== 'function') {
+      showToast('请在谷子学术桌面客户端中选择已有版面引擎。', true);
+      return;
+    }
+    let selection;
+    try {
+      selection = await desktop.chooseMineruComponent();
+    } catch (error) {
+      showToast(error.message || '无法打开版面引擎目录选择器。', true);
+      return;
+    }
+    if (!selection?.ok || selection.cancelled || !selection.path) return;
+    try {
+      await reuseLocalMinerUPath(selection.path);
+    } catch (error) {
+      showToast(error.message || '所选版面引擎未通过验证。', true);
+    }
+  }
+
   async function removeLocalMinerU() {
-    if (!await requestConfirmation('删除谷子学术管理的本地版面引擎及模型？已有文献和基础阅读功能不会受影响。', '删除本地版面引擎？')) return;
+    const external = currentLocalMinerUProvider?.external === true;
+    const message = external
+      ? '停止复用当前外部 MinerU？谷子学术只会删除保存的路径，不会删除你的 Python 环境、模型或文献。'
+      : '删除谷子学术管理的本地版面引擎及模型？已有文献和基础阅读功能不会受影响。';
+    if (!await requestConfirmation(message, external ? '停止复用外部 MinerU？' : '删除本地版面引擎？')) return;
     const button = $('#remove-local-mineru');
     button.disabled = true;
     try {
       const payload = await api('/api/parsing/providers/local-mineru/component', { method: 'DELETE' });
       renderLocalMinerUProvider(localMinerUFromPayload(payload) || await fetchParsingProviders({ render: false }));
-      showToast('本地版面引擎已删除。');
+      renderLocalMinerUDiscovery();
+      showToast(external ? '已停止复用外部 MinerU，原环境未删除。' : '本地版面引擎已删除。');
     } catch (error) {
       renderLocalMinerUProvider(currentLocalMinerUProvider || {}, error);
     } finally {
@@ -9486,6 +9665,27 @@
     }
   }
 
+  $('#scan-local-mineru')?.addEventListener('click', () => { void scanLocalMinerU(); });
+  $('#import-local-mineru')?.addEventListener('click', () => { void importLocalMinerU(); });
+  $('#local-mineru-discovery')?.addEventListener('click', (event) => {
+    const button = event.target.closest('[data-reuse-mineru-candidate]');
+    if (!button) return;
+    const index = Number(button.dataset.reuseMineruCandidate);
+    const candidate = currentLocalMinerUCandidates[index];
+    const path = parsingDiscoveryCandidatePath(candidate);
+    if (!candidate || !path) {
+      showToast('该候选环境缺少可验证的路径。', true);
+      return;
+    }
+    currentLocalMinerUCandidates.forEach((_item, candidateIndex) => {
+      const candidateButton = $(`[data-reuse-mineru-candidate="${candidateIndex}"]`);
+      if (candidateButton) candidateButton.disabled = true;
+    });
+    void reuseLocalMinerUPath(path, { candidate }).catch((error) => {
+      renderLocalMinerUDiscovery({ state: 'candidates', candidates: currentLocalMinerUCandidates });
+      showToast(error.message || '所选版面引擎未通过验证。', true);
+    });
+  });
   $('#install-local-mineru')?.addEventListener('click', () => { void installLocalMinerU(); });
   $('#cancel-local-mineru-install')?.addEventListener('click', () => { void cancelLocalMinerUInstall(); });
   $('#remove-local-mineru')?.addEventListener('click', () => { void removeLocalMinerU(); });
@@ -9802,6 +10002,13 @@
     return displayedPercent;
   }
 
+  function renderReflowPreflightFailure(message) {
+    const panel = $('#reflow-progress');
+    if (panel) panel.hidden = true;
+    updateReflowButton(false);
+    if (message) showToast(String(message), true);
+  }
+
   function mergeReflowJob(job, documentURL = '') {
     const merge = (current) => current?.job_id === job.job_id
       ? { ...current, ...job, links: { ...(current.links || {}), ...(job.links || {}), ...(documentURL ? { html: documentURL } : {}) } }
@@ -9862,20 +10069,20 @@
         if (!parsingInstallPromise) parsingInstallPromise = monitorParsingInstall().finally(() => { parsingInstallPromise = null; });
         const completed = await parsingInstallPromise;
         if (parsingProviderStatus(completed) === 'ready') return true;
-        renderReflowStatus({ status: 'failed', progress: 0, error: actionableParsingMessage(parsingErrorCode(completed), parsingDetails(completed), completed?.message) });
+        renderReflowPreflightFailure(actionableParsingMessage(parsingErrorCode(completed), parsingDetails(completed), completed?.message));
         return false;
       }
       if (['not_installed', 'cancelled', 'failed'].includes(status)) {
         const installed = await installLocalMinerU(provider);
         if (!installed) return false;
         if (parsingProviderStatus(installed) === 'ready') return true;
-        renderReflowStatus({ status: 'failed', progress: 0, error: actionableParsingMessage(parsingErrorCode(installed), parsingDetails(installed), installed?.message) });
+        renderReflowPreflightFailure(actionableParsingMessage(parsingErrorCode(installed), parsingDetails(installed), installed?.message));
         return false;
       }
-      renderReflowStatus({ status: 'failed', progress: 0, error: actionableParsingMessage(status, parsingDetails(provider), provider.message || provider.capability?.message) });
+      renderReflowPreflightFailure(actionableParsingMessage(status, parsingDetails(provider), provider.message || provider.capability?.message));
       return false;
     } catch (error) {
-      renderReflowStatus({ status: 'failed', progress: 0, error: actionableParsingMessage(error.code, error.details, error.message) });
+      renderReflowPreflightFailure(actionableParsingMessage(error.code, error.details, error.message));
       return false;
     }
   }

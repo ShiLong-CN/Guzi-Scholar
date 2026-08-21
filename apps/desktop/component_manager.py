@@ -22,6 +22,8 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Dict, Mapping, Optional
 from urllib.parse import urlsplit
 
+from mineru_discovery import MineruCandidate, discover_mineru
+
 
 CATALOG_SCHEMA_VERSION = 1
 MANIFEST_SCHEMA_VERSION = 1
@@ -30,6 +32,7 @@ MAX_MANAGED_VERSIONS = 128
 DOWNLOAD_CHUNK_BYTES = 1024 * 1024
 SAFE_TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
+SIGNATURE_POLICIES = {"developer-id-notarized", "adhoc-sha256"}
 
 # No distributable MinerU artifact has been approved yet. Keep the target and
 # requirements explicit without shipping a URL or implying release readiness.
@@ -39,6 +42,7 @@ PRODUCTION_COMPONENT_CATALOG: Dict[str, Any] = {
         "mineru": {
             "version": "unpublished",
             "model_version": "unpublished",
+            "install_help_url": "https://github.com/opendatalab/MinerU/blob/mineru-3.4.5-released/docs/zh/quick_start/index.md",
             "requirements": {
                 "platform": "darwin",
                 "arch": "arm64",
@@ -94,6 +98,8 @@ class ComponentManifest:
     min_free_disk_bytes: int
     signing_identity: str
     team_id: str
+    signature_policy: str = "developer-id-notarized"
+    local_only: bool = False
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "ComponentManifest":
@@ -128,6 +134,8 @@ class ComponentManifest:
                 min_free_disk_bytes=int(value["min_free_disk_bytes"]),
                 signing_identity=str(value.get("signing_identity") or ""),
                 team_id=str(value.get("team_id") or ""),
+                signature_policy=str(value.get("signature_policy") or "developer-id-notarized"),
+                local_only=value.get("local_only") is True,
             )
         except (TypeError, ValueError) as exc:
             raise ComponentError("组件清单字段类型无效。", code="invalid_manifest") from exc
@@ -152,7 +160,8 @@ class ComponentManifest:
             raise ComponentError("组件大小必须大于零。", code="invalid_manifest")
         if not SHA256_RE.fullmatch(self.sha256):
             raise ComponentError("组件 SHA-256 无效。", code="invalid_manifest")
-        _validate_https_url(self.url)
+        if not self.local_only:
+            _validate_https_url(self.url)
         if not self.source.strip():
             raise ComponentError("组件来源不能为空。", code="invalid_manifest")
         _safe_relative_path(self.executable, field="executable")
@@ -165,8 +174,14 @@ class ComponentManifest:
         if self.min_memory_bytes <= 0 or self.min_free_disk_bytes <= 0:
             raise ComponentError("组件系统要求必须大于零。", code="invalid_manifest")
         if self.platform == "darwin":
-            if not self.signing_identity.strip() or not re.fullmatch(r"[A-Z0-9]{10}", self.team_id):
+            if self.signature_policy not in SIGNATURE_POLICIES:
+                raise ComponentError("macOS 组件签名策略无效。", code="invalid_manifest")
+            if self.signature_policy == "developer-id-notarized" and (
+                not self.signing_identity.strip() or not re.fullmatch(r"[A-Z0-9]{10}", self.team_id)
+            ):
                 raise ComponentError("macOS 组件必须固定签名身份和 Team ID。", code="invalid_manifest")
+            if self.signature_policy == "adhoc-sha256" and (self.signing_identity or self.team_id):
+                raise ComponentError("ad-hoc 组件不能声明 Developer ID 或 Team ID。", code="invalid_manifest")
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -325,8 +340,10 @@ def _default_signature_verifier(executable: Path, manifest: ComponentManifest) -
     file_tool = Path("/usr/bin/file")
     codesign = Path("/usr/bin/codesign")
     spctl = Path("/usr/sbin/spctl")
-    if not file_tool.is_file() or not codesign.is_file() or not spctl.is_file():
-        return "系统缺少 file、codesign 或 spctl，无法验证组件架构、签名与公证"
+    if not file_tool.is_file() or not codesign.is_file():
+        return "系统缺少 file 或 codesign，无法验证组件架构与签名"
+    if manifest.signature_policy == "developer-id-notarized" and not spctl.is_file():
+        return "系统缺少 spctl，无法验证组件公证"
     try:
         architecture = subprocess.run(
             [str(file_tool), "-b", str(executable)],
@@ -352,6 +369,10 @@ def _default_signature_verifier(executable: Path, manifest: ComponentManifest) -
     output = details.stdout or ""
     if details.returncode != 0:
         return output.strip()[-500:] or "无法读取组件签名信息"
+    if manifest.signature_policy == "adhoc-sha256":
+        if "Signature=adhoc" not in output or "TeamIdentifier=not set" not in output:
+            return "组件不是无 Team ID 的 ad-hoc 签名"
+        return None
     if f"TeamIdentifier={manifest.team_id}" not in output:
         return "组件签名 Team ID 与清单不一致"
     authorities = [line.split("=", 1)[1].strip() for line in output.splitlines() if line.startswith("Authority=")]
@@ -506,6 +527,174 @@ class ComponentManager:
         raw = components.get(component) if isinstance(components, Mapping) else None
         return dict(raw) if isinstance(raw, Mapping) else {}
 
+    def _manifest_from_receipt(self, component: str, receipt: Mapping[str, Any]) -> ComponentManifest:
+        metadata = self.component_metadata(component)
+        requirements = metadata.get("requirements") if isinstance(metadata.get("requirements"), Mapping) else {}
+        installed_bytes = max(1, int(receipt.get("installed_bytes") or 1))
+        archive_sha256 = str(receipt.get("archive_sha256") or "").lower()
+        payload = {
+            "schema_version": MANIFEST_SCHEMA_VERSION,
+            "component": receipt.get("component") or component,
+            "version": receipt.get("version"),
+            "model_version": receipt.get("model_version"),
+            "platform": receipt.get("platform"),
+            "arch": receipt.get("arch"),
+            "archive_type": receipt.get("archive_type") or "zip",
+            "archive_size": max(1, int(receipt.get("archive_size") or installed_bytes)),
+            "installed_size": max(installed_bytes + 4 * 1024**2, int(receipt.get("installed_size") or 0), 1),
+            "sha256": archive_sha256,
+            "url": str(receipt.get("url") or ""),
+            "source": receipt.get("source") or "本地导入组件",
+            "executable": receipt.get("executable"),
+            "health_check_args": receipt.get("health_check_args"),
+            "min_os_version": receipt.get("min_os_version") or requirements.get("min_os_version") or "14.0",
+            "min_memory_bytes": receipt.get("min_memory_bytes") or requirements.get("min_memory_bytes") or 1,
+            "min_free_disk_bytes": receipt.get("min_free_disk_bytes") or requirements.get("min_free_disk_bytes") or 1,
+            "signing_identity": receipt.get("signing_identity"),
+            "team_id": receipt.get("team_id"),
+            "signature_policy": receipt.get("signature_policy") or "developer-id-notarized",
+            "local_only": True,
+        }
+        return ComponentManifest.from_mapping(payload)
+
+    def _discovered_manifests(self, component: str) -> list[ComponentManifest]:
+        component_root = self.root / component
+        self._assert_managed_path(component_root, self.root)
+        if not component_root.is_dir() or component_root.is_symlink():
+            return []
+        current_platform = _normalize_platform(sys.platform)
+        current_arch = _normalize_arch(platform_module.machine())
+        discovered: list[ComponentManifest] = []
+        for index, version_root in enumerate(sorted(component_root.iterdir(), key=lambda item: item.name)):
+            if index >= MAX_MANAGED_VERSIONS:
+                break
+            if version_root.is_symlink() or not version_root.is_dir() or not SAFE_TOKEN_RE.fullmatch(version_root.name):
+                continue
+            for target in sorted(version_root.iterdir(), key=lambda item: item.name):
+                if target.is_symlink() or not target.is_dir() or target.name != f"{current_platform}-{current_arch}":
+                    continue
+                try:
+                    receipt = json.loads((target / "component.json").read_text(encoding="utf-8"))
+                    manifest = self._manifest_from_receipt(component, receipt)
+                except (OSError, TypeError, ValueError, json.JSONDecodeError, ComponentError):
+                    continue
+                if manifest.version != version_root.name or manifest.platform != current_platform or manifest.arch != current_arch:
+                    continue
+                discovered.append(manifest)
+        return sorted(discovered, key=lambda item: item.version)
+
+    def discovery_status(self, component: str) -> Dict[str, Any]:
+        manifests = self._discovered_manifests(component)
+        return {
+            "state": "found" if manifests else "not_found",
+            "candidate_count": len(manifests),
+            "versions": [manifest.version for manifest in manifests],
+        }
+
+    def operation_status(self, component: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            operation = dict(self._operation) if self._operation and self._operation.get("component") == component else None
+        if operation:
+            operation.pop("cancel_event", None)
+        return operation
+
+    def last_outcome(self, component: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            outcome = dict(self._last_outcome) if self._last_outcome and self._last_outcome.get("component") == component else None
+        if outcome:
+            outcome.pop("component", None)
+        return outcome
+
+    def _external_pointer_path(self, component: str) -> Path:
+        pointer = self.root / component / "external.json"
+        self._assert_managed_path(pointer, self.root)
+        return pointer
+
+    def external_candidate_status(
+        self,
+        component: str,
+    ) -> tuple[Optional[MineruCandidate], Optional[Dict[str, Any]]]:
+        pointer = self._external_pointer_path(component)
+        if not pointer.exists() and not pointer.is_symlink():
+            return None, None
+        if pointer.is_symlink() or not pointer.is_file():
+            return None, {
+                "state": "external_invalid",
+                "reason_code": "external_invalid",
+                "message": "已保存的外部版面引擎记录无效，请重新选择。",
+            }
+        try:
+            data = json.loads(pointer.read_text(encoding="utf-8"))
+            if not isinstance(data, Mapping) or data.get("component") != component:
+                raise ValueError("component mismatch")
+            executable = str(data.get("executable") or "").strip()
+            if not executable:
+                raise ValueError("missing executable")
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            return None, {
+                "state": "external_invalid",
+                "reason_code": "external_invalid",
+                "message": "已保存的外部版面引擎记录无法读取，请重新选择。",
+            }
+        candidate, failure = discover_mineru(explicit_path=executable)
+        if not candidate:
+            return None, {
+                "state": "external_unhealthy",
+                "reason_code": "external_unhealthy",
+                "path": executable,
+                "message": f"已选择的外部版面引擎不可用：{failure or '健康检查失败'}",
+            }
+        try:
+            expected_sha = str(data.get("executable_sha256") or "")
+            actual_sha = _sha256(candidate.executable)
+        except OSError as exc:
+            return None, {
+                "state": "external_unhealthy",
+                "reason_code": "external_unhealthy",
+                "path": executable,
+                "message": f"无法校验已选择的外部版面引擎：{exc}",
+            }
+        if expected_sha != actual_sha:
+            return None, {
+                "state": "external_changed",
+                "reason_code": "external_changed",
+                "path": executable,
+                "message": "已选择的外部版面引擎发生变化，需要重新确认后才能使用。",
+            }
+        return candidate, {
+            "state": "ready",
+            "reason_code": "ready",
+            "path": str(candidate.executable),
+        }
+
+    def external_candidate(self, component: str) -> Optional[MineruCandidate]:
+        candidate, _status = self.external_candidate_status(component)
+        return candidate
+
+    def configure_external(self, component: str, executable: Path) -> MineruCandidate:
+        candidate, failure = discover_mineru(explicit_path=executable)
+        if not candidate:
+            raise ComponentError(f"无法复用所选版面引擎：{failure or '健康检查失败'}", code="invalid_external_component")
+        pointer = self._external_pointer_path(component)
+        _write_json_atomic(pointer, {
+            "schema_version": 1,
+            "component": component,
+            "executable": str(candidate.executable),
+            "executable_sha256": _sha256(candidate.executable),
+            "source": candidate.source,
+            "version": candidate.version,
+        })
+        return candidate
+
+    def clear_external(self, component: str) -> bool:
+        pointer = self._external_pointer_path(component)
+        if pointer.is_symlink():
+            raise ComponentError("拒绝删除符号链接版面引擎指针。", code="unsafe_install_path")
+        existed = pointer.is_file()
+        if existed:
+            pointer.unlink()
+        return existed
+
     def manifest_for(self, component: str) -> Optional[ComponentManifest]:
         metadata = self.component_metadata(component)
         requirements = metadata.get("requirements")
@@ -515,7 +704,8 @@ class ComponentManager:
         key = f"{_normalize_platform(str(requirements.get('platform') or ''))}-{_normalize_arch(str(requirements.get('arch') or ''))}"
         artifact = artifacts.get(key)
         if not isinstance(artifact, Mapping):
-            return None
+            discovered = self._discovered_manifests(component)
+            return discovered[-1] if discovered else None
         merged = {
             "schema_version": MANIFEST_SCHEMA_VERSION,
             "component": component,
@@ -631,11 +821,15 @@ class ComponentManager:
             return False
         if not directory.joinpath(*executable.parts).is_file():
             return False
-        if manifest.platform == "darwin" and (
-            not str(receipt.get("signing_identity") or "").strip()
-            or not re.fullmatch(r"[A-Z0-9]{10}", str(receipt.get("team_id") or ""))
-        ):
-            return False
+        if manifest.platform == "darwin":
+            signature_policy = str(receipt.get("signature_policy") or "developer-id-notarized")
+            if signature_policy not in SIGNATURE_POLICIES:
+                return False
+            if signature_policy == "developer-id-notarized" and (
+                not str(receipt.get("signing_identity") or "").strip()
+                or not re.fullmatch(r"[A-Z0-9]{10}", str(receipt.get("team_id") or ""))
+            ):
+                return False
         return True
 
     def _managed_installs(self, manifest: ComponentManifest) -> list[Dict[str, Any]]:
@@ -804,16 +998,18 @@ class ComponentManager:
             )
         return None
 
-    def _installed_status(self, manifest: ComponentManifest) -> Optional[Dict[str, Any]]:
-        target = self.target_dir(manifest)
-        try:
-            self._assert_managed_path(target, self.root)
-        except ComponentError as exc:
-            return {"state": "corrupt", "reason_code": exc.code}
+    def _installed_status(self, manifest: ComponentManifest, *, target: Optional[Path] = None) -> Optional[Dict[str, Any]]:
+        managed_target = target is None
+        target = self.target_dir(manifest) if target is None else Path(target).expanduser().resolve()
+        if managed_target:
+            try:
+                self._assert_managed_path(target, self.root)
+            except ComponentError as exc:
+                return {"state": "corrupt", "reason_code": exc.code}
         if target.is_symlink():
             return {"state": "corrupt", "reason_code": "unsafe_install_path"}
         receipt_path = target / "component.json"
-        executable = self.executable_path(manifest)
+        executable = target.joinpath(*_safe_relative_path(manifest.executable, field="executable").parts)
         if target.exists() and not target.is_dir():
             return {"state": "corrupt", "reason_code": "install_path_conflict"}
         if not target.is_dir():
@@ -844,6 +1040,8 @@ class ComponentManager:
             "team_id": manifest.team_id,
         }
         if any(receipt.get(key) != value for key, value in expected.items()):
+            return {"state": "corrupt", "reason_code": "receipt_mismatch"}
+        if str(receipt.get("signature_policy") or "developer-id-notarized") != manifest.signature_policy:
             return {"state": "corrupt", "reason_code": "receipt_mismatch"}
         current = executable
         while current != target:
@@ -957,6 +1155,113 @@ class ComponentManager:
             operation["stage"] = "正在取消安装"
             return True
 
+    def import_existing(self, component: str, source: Path, *, progress: Optional[ProgressCallback] = None) -> Dict[str, Any]:
+        def remember_failure(error: ComponentError) -> ComponentError:
+            self._record_outcome({
+                "component": component,
+                "state": "failed",
+                "reason_code": error.code,
+                "error": str(error),
+                "details": dict(error.details),
+            })
+            return error
+
+        source = Path(source).expanduser()
+        if not source.is_dir() or source.is_symlink():
+            raise remember_failure(ComponentError("请选择包含 component.json 的本地版面引擎目录。", code="invalid_local_component"))
+        try:
+            receipt = json.loads((source / "component.json").read_text(encoding="utf-8"))
+            manifest = self._manifest_from_receipt(component, receipt)
+        except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise remember_failure(ComponentError("本地版面引擎缺少有效的 component.json。", code="invalid_local_component")) from exc
+        except ComponentError as exc:
+            raise remember_failure(ComponentError(f"本地版面引擎凭据无效：{exc}", code="invalid_local_component")) from exc
+        if manifest.component != component:
+            raise remember_failure(ComponentError("所选目录不是目标版面引擎。", code="invalid_local_component"))
+        current_platform = _normalize_platform(sys.platform)
+        current_arch = _normalize_arch(platform_module.machine())
+        if manifest.platform != current_platform or manifest.arch != current_arch:
+            raise remember_failure(ComponentError(
+                "所选版面引擎与当前设备架构不匹配。",
+                code="unsupported_arch",
+                details={"required": f"{current_platform}-{current_arch}", "actual": f"{manifest.platform}-{manifest.arch}"},
+            ))
+        failure = self._system_failure(manifest, check_disk=True)
+        if failure:
+            raise remember_failure(failure)
+        source_status = self._installed_status(manifest, target=source)
+        if not source_status or source_status.get("state") != "ready":
+            raise remember_failure(ComponentError("所选版面引擎未通过完整性检查或健康检查。", code="invalid_local_component"))
+        source_executable = source.joinpath(*_safe_relative_path(manifest.executable, field="executable").parts)
+        signature_failure = self.signature_verifier(source_executable, manifest)
+        if signature_failure:
+            raise remember_failure(ComponentError(f"本地版面引擎签名验证失败：{signature_failure}", code="signature_verification_failed"))
+        health_failure = self.executable_health_check(source_executable, manifest)
+        if health_failure:
+            raise remember_failure(ComponentError(f"本地版面引擎健康检查失败：{health_failure}", code="component_unhealthy"))
+
+        target = self.target_dir(manifest)
+        if source.resolve() == target.resolve():
+            return self.status(manifest)
+        self._set_operation(component=component, state="importing", stage="正在复制已有版面引擎", progress=0.0)
+        version_root = target.parent
+        staging = version_root / f".staging-import-{manifest.platform}-{manifest.arch}-{uuid.uuid4().hex}"
+        published = False
+        try:
+            self._assert_managed_path(target, self.root)
+            self._assert_managed_path(staging, self.root)
+            if target.exists() or target.is_symlink():
+                existing = self._installed_status(manifest)
+                if existing and existing.get("state") == "ready":
+                    return self.status(manifest)
+                raise remember_failure(ComponentError("目标组件目录已存在但未通过校验。", code="install_conflict"))
+            version_root.mkdir(parents=True, exist_ok=True)
+            staging.mkdir(parents=False, exist_ok=False)
+            total_bytes = 0
+            for current, directories, files in os.walk(source, topdown=True, followlinks=False):
+                current_path = Path(current)
+                directories[:] = sorted(directories)
+                files[:] = sorted(files)
+                if any((current_path / name).is_symlink() for name in directories + files):
+                    raise remember_failure(ComponentError("本地版面引擎不能包含符号链接。", code="unsafe_install_path"))
+                relative = current_path.relative_to(source)
+                destination = staging / relative
+                destination.mkdir(parents=True, exist_ok=True)
+                for name in files:
+                    source_file = current_path / name
+                    total_bytes += max(0, int(source_file.stat().st_size))
+                    if total_bytes > manifest.installed_size:
+                        raise remember_failure(ComponentError("本地版面引擎超过清单声明的大小。", code="archive_limits_exceeded"))
+                    shutil.copy2(source_file, destination / name)
+                if progress:
+                    progress("复制已有版面引擎", min(0.9, total_bytes / max(1, manifest.installed_size)))
+            os.replace(staging, target)
+            published = True
+            result = self._installed_status(manifest)
+            if not result or result.get("state") != "ready":
+                raise remember_failure(ComponentError("本地版面引擎导入后校验失败。", code="publish_verification_failed"))
+            target_executable = target.joinpath(*_safe_relative_path(manifest.executable, field="executable").parts)
+            target_signature_failure = self.signature_verifier(target_executable, manifest)
+            if target_signature_failure:
+                raise remember_failure(ComponentError(f"本地版面引擎导入后签名验证失败：{target_signature_failure}", code="signature_verification_failed"))
+            target_health_failure = self.executable_health_check(target_executable, manifest)
+            if target_health_failure:
+                raise remember_failure(ComponentError(f"本地版面引擎导入后健康检查失败：{target_health_failure}", code="component_unhealthy"))
+            self._record_outcome({"component": component, "state": "completed", "reason_code": "ready"})
+            if progress:
+                progress("导入完成", 1.0)
+            self._clear_operation()
+            return self.status(manifest)
+        except ComponentError as exc:
+            remember_failure(exc)
+            if published and target.is_dir() and not target.is_symlink():
+                shutil.rmtree(target)
+            raise
+        finally:
+            if staging.exists() or staging.is_symlink():
+                self._remove_generated_path(staging, version_root)
+            self._clear_operation()
+
     def install(
         self,
         manifest: ComponentManifest,
@@ -965,6 +1270,8 @@ class ComponentManager:
         cancel_event: Any = None,
     ) -> Dict[str, Any]:
         manifest.validate()
+        if manifest.local_only:
+            raise ComponentError("该组件只能从已验证的本地目录导入。", code="not_installable")
         installed = self._installed_status(manifest)
         if installed and installed.get("state") == "ready":
             return self.status(manifest)
@@ -1079,6 +1386,7 @@ class ComponentManager:
                 "source": manifest.source,
                 "signing_identity": manifest.signing_identity,
                 "team_id": manifest.team_id,
+                "signature_policy": manifest.signature_policy,
             }
             receipt_path = staging / "component.json"
             receipt_path.write_text(json.dumps(receipt, ensure_ascii=False, indent=2), encoding="utf-8")

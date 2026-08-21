@@ -2468,6 +2468,18 @@ def _provider_failure(capability: Dict[str, Any]) -> ProviderError:
     return ProviderError(message, code=code, details={"provider": capability})
 
 
+def _ensure_provider_configuration_idle(action: str) -> None:
+    active_reflow = any(
+        isinstance(record.get("reflow"), dict)
+        and record["reflow"].get("status") in {"queued", "running", "cancelling"}
+        for record in (STORE.list() if STORE is not None else [])
+    )
+    if active_reflow:
+        raise ProviderError(f"AI 重排正在使用版面引擎，暂不能{action}。", code="busy")
+    if PARSING_INSTALL_THREAD is not None and PARSING_INSTALL_THREAD.is_alive():
+        raise ProviderError(f"版面引擎安装或导入正在进行中，暂不能{action}。", code="busy")
+
+
 def _run_provider_install(provider_id: str, cancel_event: threading.Event) -> None:
     global PARSING_INSTALL_CANCEL_EVENT, PARSING_INSTALL_THREAD
     try:
@@ -2480,6 +2492,19 @@ def _run_provider_install(provider_id: str, cancel_event: threading.Event) -> No
         with PARSING_PROVIDER_LOCK:
             PARSING_INSTALL_THREAD = None
             PARSING_INSTALL_CANCEL_EVENT = None
+
+
+def _run_provider_import(provider_id: str, source: Path) -> None:
+    global PARSING_INSTALL_THREAD
+    try:
+        _parsing_provider_registry().get(provider_id).import_existing(source)
+    except ProviderError as exc:
+        print(f"[components] {provider_id} 导入失败：{exc}", flush=True)
+    except Exception as exc:
+        print(f"[components] {provider_id} 导入异常：{type(exc).__name__}: {exc}", flush=True)
+    finally:
+        with PARSING_PROVIDER_LOCK:
+            PARSING_INSTALL_THREAD = None
 
 
 def _run_reflow_job(job_id: str, source_name: str, generation: int) -> None:
@@ -2978,6 +3003,15 @@ class ScholarHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/parsing/providers/local-mineru/install":
             self._start_provider_install("local-mineru")
+            return
+        if path == "/api/parsing/providers/local-mineru/discover":
+            self._discover_provider_external("local-mineru")
+            return
+        if path == "/api/parsing/providers/local-mineru/select":
+            self._select_provider_external("local-mineru")
+            return
+        if path == "/api/parsing/providers/local-mineru/import":
+            self._start_provider_import("local-mineru")
             return
         if path == "/api/parsing/providers/local-mineru/install/cancel":
             self._cancel_provider_install("local-mineru")
@@ -4129,6 +4163,82 @@ class ScholarHandler(BaseHTTPRequestHandler):
             }, HTTPStatus.ACCEPTED)
         except ProviderError as exc:
             self._send_provider_error(exc)
+
+    def _discover_provider_external(self, provider_id: str) -> None:
+        try:
+            with PARSING_PROVIDER_LOCK:
+                _ensure_provider_configuration_idle("扫描本机")
+                result = _parsing_provider_registry().get(provider_id).discover_external()
+            self._send_json(result)
+        except ProviderError as exc:
+            self._send_provider_error(exc)
+
+    def _select_provider_external(self, provider_id: str) -> None:
+        try:
+            payload = self._read_json_body(max_bytes=16 * 1024)
+            source_text = str(payload.get("path") or "").strip()
+            if not source_text:
+                raise ProviderError("请选择已有版面引擎目录。", code="invalid_external_component")
+            with PARSING_PROVIDER_LOCK:
+                _ensure_provider_configuration_idle("选择已有版面引擎")
+                provider = _parsing_provider_registry().get(provider_id)
+                capability = provider.capability()
+                if not capability.get("can_import"):
+                    raise _provider_failure(capability)
+                result = provider.select_external(Path(source_text).expanduser())
+            self._send_json({"provider": result})
+        except (ProviderError, PipelineError) as exc:
+            if isinstance(exc, ProviderError):
+                self._send_provider_error(exc)
+            else:
+                self._send_error_json(str(exc), HTTPStatus.BAD_REQUEST, code="invalid_external_component")
+
+    def _start_provider_import(self, provider_id: str) -> None:
+        global PARSING_INSTALL_THREAD
+        try:
+            payload = self._read_json_body(max_bytes=16 * 1024)
+            source_text = str(payload.get("path") or "").strip()
+            if not source_text:
+                raise ProviderError("请选择已有版面引擎目录。", code="invalid_local_component")
+            source = Path(source_text).expanduser()
+            with PARSING_PROVIDER_LOCK:
+                provider = _parsing_provider_registry().get(provider_id)
+                capability = provider.capability()
+                if capability.get("ready") and not capability.get("update_available"):
+                    self._send_json({"provider": capability})
+                    return
+                if any(
+                    isinstance(record.get("reflow"), dict)
+                    and record["reflow"].get("status") in {"queued", "running", "cancelling"}
+                    for record in (STORE.list() if STORE is not None else [])
+                ):
+                    raise ProviderError("AI 重排正在使用版面引擎，暂不能导入。", code="busy")
+                if not capability.get("can_import"):
+                    raise _provider_failure(capability)
+                if PARSING_INSTALL_THREAD is not None and PARSING_INSTALL_THREAD.is_alive():
+                    raise ProviderError("版面引擎安装或导入正在进行中。", code="busy")
+                thread = threading.Thread(
+                    target=_run_provider_import,
+                    args=(provider_id, source),
+                    name="my-scholar-component-import",
+                    daemon=True,
+                )
+                PARSING_INSTALL_THREAD = thread
+                thread.start()
+            self._send_json({
+                "provider": {
+                    **capability,
+                    "state": "importing",
+                    "reason_code": "importing",
+                    "stage": "正在导入已有版面引擎",
+                    "progress": 0.0,
+                }
+            }, HTTPStatus.ACCEPTED)
+        except (ProviderError, PipelineError) as exc:
+            if isinstance(exc, ProviderError):
+                self._send_provider_error(exc)
+            else:
+                self._send_error_json(str(exc), HTTPStatus.BAD_REQUEST, code="invalid_local_component")
 
     def _cancel_provider_install(self, provider_id: str) -> None:
         try:

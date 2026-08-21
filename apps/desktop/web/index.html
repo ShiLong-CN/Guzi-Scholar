@@ -311,7 +311,11 @@
                   <div class="translation-progress-track" role="progressbar" aria-label="版面引擎安装进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="local-mineru-install-bar" class="translation-progress-bar"></div></div>
                 </div>
                 <p id="local-mineru-detail" class="parsing-provider-detail" role="status" aria-live="polite">正在检查本机组件状态。</p>
+                <div id="local-mineru-discovery" class="metadata-candidate-list" role="list" aria-live="polite" hidden></div>
                 <div class="parsing-provider-actions">
+                  <button id="scan-local-mineru" class="secondary-button compact-button" type="button">扫描本机</button>
+                  <button id="import-local-mineru" class="secondary-button compact-button" type="button">选择并复用已有版面引擎</button>
+                  <a id="local-mineru-install-guide" class="secondary-button compact-button" href="https://github.com/opendatalab/MinerU/blob/mineru-3.4.5-released/docs/zh/quick_start/index.md" target="_blank" rel="noreferrer" hidden>查看官方安装方式</a>
                   <button id="install-local-mineru" class="primary-button compact-button" type="button" hidden>一键安装版面引擎</button>
                   <button id="cancel-local-mineru-install" class="secondary-button compact-button" type="button" hidden>取消安装</button>
                   <button id="remove-local-mineru" class="secondary-button compact-button danger-button" type="button" hidden>删除组件</button>
@@ -374,7 +378,7 @@
             </div>
             <div class="settings-row source-attribution-row">
               <div><strong>开源来源</strong><small>本软件基于谷子学术（Guzi Scholar）开源项目。二次开发与再发布请保留项目名称、来源说明和本页面的署名信息。</small></div>
-              <a class="secondary-button compact-button" href="https://github.com/ShiLong-CN/guzi-scholar" target="_blank" rel="noreferrer">查看源代码</a>
+              <a class="secondary-button compact-button" href="https://github.com/Chinese-Dragon-Li/Guzi-Scholar" target="_blank" rel="noreferrer">查看源代码</a>
             </div>
             <div id="update-status-card" class="update-status-card is-idle" role="status" aria-live="polite">
               <span class="update-status-dot" aria-hidden="true"></span>
