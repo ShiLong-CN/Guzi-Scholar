@@ -1293,6 +1293,219 @@ def _render_pages(pdf_path: Path, target: Path, page_count: int, dpi: int = 144)
     return rendered
 
 
+def _png_dimensions(path: Path) -> Optional[Tuple[int, int]]:
+    """Read PNG dimensions without requiring an image library in the bundle."""
+    try:
+        with Path(path).open("rb") as stream:
+            header = stream.read(24)
+        if len(header) < 24 or header[:8] != b"\x89PNG\r\n\x1a\n":
+            return None
+        width = int.from_bytes(header[16:20], "big")
+        height = int.from_bytes(header[20:24], "big")
+        return (width, height) if width > 0 and height > 0 else None
+    except (OSError, ValueError):
+        return None
+
+
+def _visual_coordinate_canvas(
+    items: Sequence[Dict[str, Any]],
+    page_width: float,
+    page_height: float,
+) -> Tuple[float, float]:
+    """Return the sidecar coordinate canvas for a rendered PDF page.
+
+    MinerU content lists use a normalized 1000x1000 canvas. ODL sidecars use
+    PDF points, so their canvas is the actual page size rather than the largest
+    observed element (which may be a narrow figure). The coordinate source is
+    authoritative when present; the size check keeps legacy sidecars working.
+    """
+    max_x = 0.0
+    max_y = 0.0
+    mineru_coordinates = False
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        box = item.get("bbox")
+        if isinstance(box, (list, tuple)) and len(box) == 4:
+            try:
+                left, top, right, bottom = (float(value) for value in box)
+            except (TypeError, ValueError):
+                left = top = right = bottom = 0.0
+            if right > left and bottom > top:
+                max_x = max(max_x, right)
+                max_y = max(max_y, bottom)
+        ir_metadata = item.get("_ir") if isinstance(item.get("_ir"), dict) else {}
+        if str(ir_metadata.get("source") or "").startswith("mineru"):
+            mineru_coordinates = True
+    if mineru_coordinates or max_x > page_width * 1.2 or max_y > page_height * 1.2:
+        return 1000.0, 1000.0
+    return max(1.0, float(page_width)), max(1.0, float(page_height))
+
+
+def _render_pdf_visual_crops_java(
+    pdf_path: Path,
+    pages: List[List[Dict[str, Any]]],
+    assets: Path,
+    *,
+    dpi: int,
+    target_width_px: int,
+    max_dpi: int,
+    max_pixels: int,
+    metadata: Dict[str, Dict[str, Any]],
+    budget: LayoutRenderBudget,
+    page_assets: Optional[Sequence[str]] = None,
+    page_assets_dir: Optional[Path] = None,
+    page_dpi: int = 144,
+) -> Dict[str, str]:
+    """Render crops through the bundled PDFBox helper when PyMuPDF is absent."""
+    java = str(os.environ.get("MY_SCHOLAR_JAVA") or "").strip()
+    classpath = str(os.environ.get("MY_SCHOLAR_PDF_RENDERER_CLASSPATH") or "").strip()
+    if not java or not classpath or not Path(java).is_file() or not Path(pdf_path).is_file():
+        return {}
+    try:
+        page_dpi = max(36, min(600, int(page_dpi)))
+    except (TypeError, ValueError):
+        page_dpi = 144
+    assets.mkdir(parents=True, exist_ok=True)
+    requests: List[Dict[str, Any]] = []
+    used_targets: Set[str] = set()
+    for page_index, items in enumerate(pages):
+        page_size = None
+        if page_assets_dir is not None and page_assets and page_index < len(page_assets):
+            page_size = _png_dimensions(Path(page_assets_dir) / str(page_assets[page_index]))
+        if page_size is None:
+            page_size = (
+                max(1, round(612.0 * page_dpi / 72.0)),
+                max(1, round(792.0 * page_dpi / 72.0)),
+            )
+        page_width_px, page_height_px = page_size
+        page_width_pt = page_width_px * 72.0 / page_dpi
+        page_height_pt = page_height_px * 72.0 / page_dpi
+        canvas_width, canvas_height = _visual_coordinate_canvas(items, page_width_pt, page_height_pt)
+        for element_index, item in enumerate(items):
+            if not isinstance(item, dict) or str(item.get("type") or "") not in {"image", "table"}:
+                continue
+            bbox = item.get("bbox")
+            if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+                continue
+            try:
+                left, top, right, bottom = (float(value) for value in bbox)
+            except (TypeError, ValueError):
+                continue
+            left_ratio = max(0.0, min(1.0, left / canvas_width))
+            top_ratio = max(0.0, min(1.0, top / canvas_height))
+            right_ratio = max(0.0, min(1.0, right / canvas_width))
+            bottom_ratio = max(0.0, min(1.0, bottom / canvas_height))
+            if right_ratio <= left_ratio or bottom_ratio <= top_ratio:
+                continue
+            crop_width_pt = max(1.0, (right_ratio - left_ratio) * page_width_pt)
+            crop_height_pt = max(1.0, (bottom_ratio - top_ratio) * page_height_pt)
+            density_dpi = math.ceil(target_width_px * 72.0 / crop_width_pt)
+            selected_dpi = min(max_dpi, max(dpi, density_dpi))
+            cap_dpi = math.floor(72.0 * math.sqrt(max_pixels / (crop_width_pt * crop_height_pt)))
+            requested_dpi = selected_dpi
+            selected_dpi = max(1, min(selected_dpi, cap_dpi))
+            pixel_cap_applied = selected_dpi < requested_dpi
+            estimated_width = max(1, math.ceil(crop_width_pt * selected_dpi / 72.0) + 2)
+            estimated_height = max(1, math.ceil(crop_height_pt * selected_dpi / 72.0) + 2)
+            ir_metadata = item.get("_ir") if isinstance(item.get("_ir"), dict) else {}
+            block_id = str(ir_metadata.get("block_id") or f"block-{page_index + 1}-{element_index}-{item.get('type')}")
+            reservation = budget.reserve_visual(block_id, estimated_width * estimated_height)
+            if reservation is None:
+                metadata[block_id] = {
+                    "asset": None, "actual_dpi": None, "visual_source": "source-fallback",
+                    "fallback": True, "fallback_reason": budget.last_reason, "quality": "fallback",
+                }
+                continue
+            safe_id = re.sub(r"[^A-Za-z0-9._-]+", "-", block_id).strip("-.") or f"{page_index + 1}-{element_index}"
+            filename = f"pdf-{safe_id}@{selected_dpi}.png"
+            if filename in used_targets:
+                filename = f"pdf-{safe_id}-{element_index}@{selected_dpi}.png"
+            used_targets.add(filename)
+            target = assets / filename
+            requests.append({
+                "page": page_index + 1,
+                "left": left_ratio,
+                "top": top_ratio,
+                "right": right_ratio,
+                "bottom": bottom_ratio,
+                "dpi": selected_dpi,
+                "target": target,
+                "block_id": block_id,
+                "reservation": reservation,
+                "pixel_cap_applied": pixel_cap_applied,
+            })
+    if not requests:
+        return {}
+
+    rendered: Dict[str, str] = {}
+    with tempfile.TemporaryDirectory(prefix="my-scholar-java-crops-") as temp:
+        manifest = Path(temp) / "crops.tsv"
+        manifest.write_text(
+            "".join(
+                f"{request['page']}\t{request['left']:.8f}\t{request['top']:.8f}\t"
+                f"{request['right']:.8f}\t{request['bottom']:.8f}\t{request['dpi']}\t"
+                f"{request['target']}\n"
+                for request in requests
+            ),
+            encoding="utf-8",
+        )
+        command = [
+            java,
+            "--add-opens=java.base/java.nio=ALL-UNNAMED",
+            "-Djava.awt.headless=true",
+            "-cp",
+            classpath,
+            "MyScholarPdfRenderer",
+            "--crop",
+            str(pdf_path),
+            str(manifest),
+        ]
+        try:
+            subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=True, timeout=600)
+        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            for request in requests:
+                request["target"].unlink(missing_ok=True)
+                budget.reject_visual(request["block_id"], request["reservation"], "java-crop-render-error")
+                metadata[request["block_id"]] = {
+                    "asset": None, "actual_dpi": request["dpi"], "visual_source": "source-fallback",
+                    "fallback": True, "fallback_reason": "java-crop-render-error", "quality": "fallback",
+                }
+            return {}
+
+    for request in requests:
+        target = request["target"]
+        dimensions = _png_dimensions(target)
+        if dimensions is None:
+            budget.reject_visual(request["block_id"], request["reservation"], "java-crop-missing-output")
+            metadata[request["block_id"]] = {
+                "asset": None, "actual_dpi": request["dpi"], "visual_source": "source-fallback",
+                "fallback": True, "fallback_reason": "java-crop-missing-output", "quality": "fallback",
+            }
+            continue
+        pixel_width, pixel_height = dimensions
+        png_bytes = target.stat().st_size
+        if not budget.finish_visual(request["block_id"], request["reservation"], pixel_width * pixel_height, png_bytes):
+            target.unlink(missing_ok=True)
+            metadata[request["block_id"]] = {
+                "asset": None, "actual_dpi": request["dpi"], "pixel_width": pixel_width,
+                "pixel_height": pixel_height, "visual_source": "source-fallback", "fallback": True,
+                "fallback_reason": budget.last_reason, "quality": "fallback",
+            }
+            continue
+        asset = f"assets/images/{target.name}"
+        rendered[request["block_id"]] = asset
+        metadata[request["block_id"]] = {
+            "asset": asset, "actual_dpi": request["dpi"], "pixel_width": pixel_width,
+            "pixel_height": pixel_height, "visual_source": "pdf-crop", "fallback": False,
+            "fallback_reason": None, "quality": "adaptive", "target_width_px": target_width_px,
+            "target_width_met": pixel_width >= target_width_px,
+            "pixel_cap_applied": request["pixel_cap_applied"], "max_pixels": max_pixels,
+            "renderer": "pdfbox",
+        }
+    return rendered
+
+
 def _render_pdf_visual_crops(
     pdf_path: Path,
     pages: List[List[Dict[str, Any]]],
@@ -1304,6 +1517,9 @@ def _render_pdf_visual_crops(
     max_pixels: int = VISUAL_CROP_MAX_PIXELS,
     metadata: Optional[Dict[str, Dict[str, Any]]] = None,
     budget: Optional[LayoutRenderBudget] = None,
+    page_assets: Optional[Sequence[str]] = None,
+    page_assets_dir: Optional[Path] = None,
+    page_dpi: int = 144,
 ) -> Dict[str, str]:
     """Render figure/table regions from the source PDF at reading resolution.
 
@@ -1314,11 +1530,6 @@ def _render_pdf_visual_crops(
     controls output density only; it does not add detail missing from a raster
     image embedded in the source PDF.
     """
-    try:
-        import fitz  # type: ignore
-    except Exception:
-        return {}
-
     try:
         base_dpi = max(1, min(VISUAL_CROP_MAX_DPI, int(dpi)))
     except (TypeError, ValueError):
@@ -1336,6 +1547,23 @@ def _render_pdf_visual_crops(
         pixel_limit = max(1, int(max_pixels))
     except (TypeError, ValueError):
         pixel_limit = VISUAL_CROP_MAX_PIXELS
+    try:
+        import fitz  # type: ignore
+    except Exception:
+        return _render_pdf_visual_crops_java(
+            pdf_path,
+            pages,
+            assets,
+            dpi=base_dpi,
+            target_width_px=target_width,
+            max_dpi=maximum_dpi,
+            max_pixels=pixel_limit,
+            metadata=metadata if metadata is not None else {},
+            budget=budget or LayoutRenderBudget(),
+            page_assets=page_assets,
+            page_assets_dir=page_assets_dir,
+            page_dpi=page_dpi,
+        )
 
     assets.mkdir(parents=True, exist_ok=True)
     rendered: Dict[str, str] = {}
@@ -1347,22 +1575,12 @@ def _render_pdf_visual_crops(
             if page_index >= len(document):
                 break
             page = document[page_index]
-            page_boxes: List[Tuple[float, float]] = []
-            for entry in items:
-                box = entry.get("bbox") if isinstance(entry, dict) else None
-                if not isinstance(box, (list, tuple)) or len(box) != 4:
-                    continue
-                try:
-                    page_boxes.append((float(box[2]), float(box[3])))
-                except (TypeError, ValueError):
-                    continue
-            max_x = max((box[0] for box in page_boxes), default=0.0)
-            max_y = max((box[1] for box in page_boxes), default=0.0)
-            if max_x <= page.rect.width * 1.2 and max_y <= page.rect.height * 1.2:
+            canvas_width, canvas_height = _visual_coordinate_canvas(items, page.rect.width, page.rect.height)
+            if canvas_width == page.rect.width and canvas_height == page.rect.height:
                 scale_x = scale_y = 1.0
             else:
-                scale_x = page.rect.width / 1000.0
-                scale_y = page.rect.height / 1000.0
+                scale_x = page.rect.width / canvas_width
+                scale_y = page.rect.height / canvas_height
             for element_index, item in enumerate(items):
                 if not isinstance(item, dict) or str(item.get("type", "")) not in {"image", "table"}:
                     continue
@@ -2078,14 +2296,19 @@ def _build_document_html(
                 source_asset = _asset_path(source, mapping)
                 pdf_crop = (visual_assets or {}).get(block_id)
                 crop_metadata = (visual_asset_metadata or {}).get(block_id, {})
-                visual_asset = pdf_crop or source_asset
+                ir_source = str(ir_metadata.get("source") or "")
+                # A composite figure must never fall back to the whole page:
+                # that makes the surrounding prose look like part of the
+                # figure. The bundled PDFBox crop renderer supplies the
+                # bounded source crop when PyMuPDF is unavailable.
+                visual_asset = pdf_crop or (None if ir_source == "mineru-composite" else source_asset)
                 image = _image_asset(visual_asset, caption or f"Figure {figure_number}")
                 block = f'<figure class="pdf-figure" id="{anchor}" data-block-id="{block_id}" data-page="{page_no}" data-bbox="{html.escape(json.dumps(bbox), quote=True)}">{image}<figcaption data-translate-block-id="{block_id}">{_caption_html(content, "image_caption", renderer)}</figcaption></figure>'
                 record.update({
                     "image_source": source,
                     "source_asset": source_asset,
                     "visual_asset": visual_asset,
-                    "visual_source": "pdf-crop" if pdf_crop else "mineru-crop",
+                    "visual_source": "pdf-crop" if pdf_crop else ("source-unavailable" if ir_source == "mineru-composite" else "mineru-crop"),
                     "visual_fallback": not bool(pdf_crop),
                     "visual_fallback_reason": crop_metadata.get("fallback_reason"),
                     "visual_quality": crop_metadata.get("quality", "fallback" if not pdf_crop else "adaptive"),
@@ -2534,6 +2757,13 @@ def process_layout_pdf(
     active_budget = render_budget or LayoutRenderBudget()
     mapping = _copy_sidecar_images(sidecar, assets, budget=active_budget)
     _raise_if_cancelled(cancel_event)
+    render_budget_report = active_budget.report()
+    try:
+        page_dpi = max(36, min(600, int(os.environ.get("MY_SCHOLAR_PAGE_DPI", "144"))))
+    except (TypeError, ValueError):
+        page_dpi = 144
+    page_assets = _render_pages(source_copy, job_dir / "pages", len(pages), dpi=page_dpi)
+    _raise_if_cancelled(cancel_event)
     visual_dpi = _visual_crop_base_dpi()
     visual_asset_metadata: Dict[str, Dict[str, Any]] = {}
     visual_assets = _render_pdf_visual_crops(
@@ -2543,10 +2773,12 @@ def process_layout_pdf(
         dpi=visual_dpi,
         metadata=visual_asset_metadata,
         budget=active_budget,
+        page_assets=page_assets,
+        page_assets_dir=job_dir / "pages",
+        page_dpi=page_dpi,
     )
     _raise_if_cancelled(cancel_event)
     render_budget_report = active_budget.report()
-    page_assets = _render_pages(source_copy, job_dir / "pages", len(pages), dpi=int(os.environ.get("MY_SCHOLAR_PAGE_DPI", "144")))
     _raise_if_cancelled(cancel_event)
     formula_dir = _find_formula_dir(pdf_path, source_name)
     formula_candidates = _load_formula_candidates(formula_dir)

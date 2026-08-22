@@ -644,6 +644,94 @@ class DocumentIRTest(unittest.TestCase):
         self.assertEqual(rendered["content"]["image_caption"][0]["content"], "Figure 4. Trade-off chart.")
         self.assertTrue(any(item["reason"] == "empty-text" for item in ir["suppressed"]))
 
+    def test_mineru_multi_panel_figure_is_kept_as_one_composite_visual(self) -> None:
+        pages = [[
+            {
+                "type": "chart", "bbox": [20, 20, 320, 260],
+                "content": {"image_source": {"path": "images/figure-a.png"}, "chart_caption": "Figure 1 (a) Main plot."},
+            },
+            {
+                "type": "chart", "bbox": [330, 20, 520, 260],
+                "content": {"image_source": {"path": "images/figure-b.png"}, "chart_caption": "Figure 1 (b) Color scale."},
+            },
+            {
+                "type": "chart", "bbox": [20, 270, 260, 430],
+                "content": {"image_source": {"path": "images/figure-c.png"}, "chart_caption": "Figure 1 (c) Ablation."},
+            },
+        ]]
+
+        ir = mineru_to_ir(pages, backend="fixture")
+        elements = ir["pages"][0]["elements"]
+
+        self.assertEqual(len(elements), 1)
+        self.assertEqual(elements[0]["source"], "mineru-composite")
+        self.assertIn("composite-visual", elements[0]["flags"])
+        self.assertEqual(elements[0]["bbox"], [20.0, 20.0, 520.0, 430.0])
+        self.assertEqual(len(elements[0]["visual_fragments"]), 3)
+        self.assertEqual(
+            len([item for item in ir["suppressed"] if item["reason"] == "composite-figure-fragment"]),
+            3,
+        )
+
+    def test_mineru_multi_panel_figure_expands_transitively_from_caption_anchor(self) -> None:
+        pages = [[
+            {"type": "chart", "bbox": [176, 140, 328, 260], "content": {"chart_caption": "(a)"}},
+            {"type": "chart", "bbox": [336, 138, 491, 260], "content": {"chart_caption": "(b)"}},
+            {"type": "chart", "bbox": [500, 138, 651, 260], "content": {"chart_caption": "(c)"}},
+            {
+                "type": "chart", "bbox": [658, 133, 820, 260],
+                "content": {"chart_caption": "(d) Figure 5: Analysis regarding the selection of Top K most relevant descriptions."},
+            },
+        ]]
+
+        ir = mineru_to_ir(pages, backend="fixture")
+        elements = ir["pages"][0]["elements"]
+
+        self.assertEqual(len(elements), 1)
+        self.assertEqual(elements[0]["source"], "mineru-composite")
+        self.assertEqual(elements[0]["bbox"], [176.0, 133.0, 820.0, 260.0])
+        self.assertEqual(len(elements[0]["visual_fragments"]), 4)
+        self.assertEqual(
+            len([item for item in ir["suppressed"] if item["reason"] == "composite-figure-fragment"]),
+            4,
+        )
+
+    def test_mineru_different_figure_numbers_are_not_coalesced(self) -> None:
+        pages = [[
+            {
+                "type": "chart", "bbox": [20, 20, 260, 180],
+                "content": {"chart_caption": "Figure 1. First result."},
+            },
+            {
+                "type": "chart", "bbox": [270, 20, 520, 180],
+                "content": {"chart_caption": "Figure 2. Second result."},
+            },
+        ]]
+
+        ir = mineru_to_ir(pages, backend="fixture")
+        elements = ir["pages"][0]["elements"]
+
+        self.assertEqual(len(elements), 2)
+        self.assertTrue(all(item["source"] == "mineru" for item in elements))
+        self.assertFalse(any(item["reason"] == "composite-figure-fragment" for item in ir["suppressed"]))
+
+    def test_mineru_figure_anchor_absorbs_uncaptioned_panel_fragments(self) -> None:
+        pages = [[
+            {
+                "type": "chart", "bbox": [20, 20, 360, 300],
+                "content": {"chart_caption": "Figure 3. Composite experiment."},
+            },
+            {"type": "chart", "bbox": [370, 20, 520, 300], "content": {"chart_caption": ""}},
+            {"type": "chart", "bbox": [20, 310, 250, 460], "content": {"chart_caption": "(a)"}},
+        ]]
+
+        ir = mineru_to_ir(pages, backend="fixture")
+        elements = ir["pages"][0]["elements"]
+
+        self.assertEqual(len(elements), 1)
+        self.assertEqual(elements[0]["source"], "mineru-composite")
+        self.assertEqual(len(elements[0]["visual_fragments"]), 3)
+
     def test_chart_caption_drops_only_clear_full_segment_prefix(self) -> None:
         pages = [[{
             "type": "chart",

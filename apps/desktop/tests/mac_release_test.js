@@ -72,7 +72,7 @@ assert.strictEqual(manifest.build?.productName, '谷子学术');
 assert.strictEqual(manifest.build?.directories?.output, 'dist/mac.noindex');
 assert.strictEqual(manifest.build?.mac?.extendInfo?.CFBundleDisplayName, '谷子学术');
 assert.strictEqual(manifest.build?.mac?.extendInfo?.CFBundleName, '谷子学术');
-assert.strictEqual(manifest.version, '0.1.4');
+assert.strictEqual(manifest.version, '0.1.5');
 assert.strictEqual(manifest.build?.afterPack, 'scripts/after-pack.cjs');
 assert.match(manifest.scripts?.['pack:mac'] || '', /prepare:mac/u);
 assert.match(manifest.scripts?.['dist:mac'] || '', /prepare:mac/u);
@@ -124,7 +124,7 @@ assert.match(releaseWorkflow, /Build internal macOS package[\s\S]*dist:mac:inter
 assert.match(releaseWorkflow, /Build ad-hoc macOS release package[\s\S]*inputs\.publish_release[\s\S]*dist:mac:internal/u, 'manual publishing must build the ad-hoc release target');
 assert.doesNotMatch(releaseWorkflow, /MACOS_CSC_LINK|APPLE_APP_SPECIFIC_PASSWORD|APPLE_TEAM_ID/u, 'GitHub release publishing must not imply Apple signing or notarization secrets');
 assert.match(releaseWorkflow, /gh release create[\s\S]*--verify-tag[\s\S]*--notes-file release-notes\.md[\s\S]*--title "Guzi Scholar \$RELEASE_TAG"/u, 'stable releases must be verified-tag releases with explicit notes');
-assert.doesNotMatch(releaseWorkflow, /gh release create[\s\S]*--prerelease/u, 'v0.1.4 GitHub releases must not be marked pre-release');
+assert.doesNotMatch(releaseWorkflow, /gh release create[\s\S]*--prerelease/u, 'stable GitHub releases must not be marked pre-release');
 assert.match(releaseWorkflow, /stable GitHub release[\s\S]*ad-hoc signing[\s\S]*notarized by Apple/u, 'release notes must disclose the signing and notarization status');
 assert.match(releaseWorkflow, /Gatekeeper[\s\S]*right-click \*\*谷子学术\.app\*\*[\s\S]*Open/u, 'release notes must include the first-launch Gatekeeper guidance');
 assert.match(releaseWorkflow, /certifi==2025\.8\.3/u);

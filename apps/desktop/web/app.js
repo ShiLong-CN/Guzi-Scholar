@@ -254,6 +254,21 @@
   let readerMountSequence = 0;
   let readerMount = null;
   let readerSections = [];
+  const readerSearchState = {
+    open: false,
+    query: '',
+    matches: [],
+    activeIndex: -1,
+    usingCustomHighlight: false,
+  };
+  const readerSentenceState = {
+    doc: null,
+    pairs: [],
+    activePairId: '',
+    usingCustomHighlight: false,
+    pointerFrame: 0,
+    pendingPoint: null,
+  };
 
   function persistReadingLocations() {
     readingLocationsState = normalizeReadingLocations(readingLocationsState);
@@ -582,7 +597,11 @@
 
   function clearRenderedTranslations() {
     const doc = frameDocument();
+    clearReaderSentenceHover(doc);
+    readerSentenceState.pairs = [];
     doc?.querySelectorAll('.my-scholar-translation').forEach((node) => node.remove());
+    rebuildReaderSentencePairs(doc);
+    refreshReaderSearch();
   }
 
   function translationCacheFor(jobId = state.activeJob?.job_id) {
@@ -637,6 +656,8 @@
   function switchView(viewId, { enteringDocumentId = null } = {}) {
     if (viewId !== 'library-view' && state.groupingMenuOpen) setGroupingMenuOpen(false);
     if (viewId !== 'reader-view') closeChatSessionMenu();
+    if (viewId !== 'reader-view') closeReaderSearch({ reset: true });
+    if (viewId !== 'reader-view') clearReaderSentenceHover(frameDocument());
     if (viewId !== 'reader-view' && $('#reader-view')?.classList.contains('active-view')) captureCurrentReadingLocation();
     if (viewId !== 'settings-view' && $('#settings-view')?.classList.contains('active-view')) {
       void flushPendingSettings();
@@ -2823,6 +2844,19 @@
   document.addEventListener('pointerup', handleColumnResizeUp, { passive: false });
   document.addEventListener('pointercancel', handleColumnResizeUp, { passive: false });
   document.addEventListener('keydown', handleColumnResizeKeyDown);
+  function handleLibrarySelectAllShortcut(event) {
+    if (event.defaultPrevented || event.repeat || event.isComposing) return;
+    if (!(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey || String(event.key || '').toLowerCase() !== 'a') return;
+    if (!$('#library-view')?.classList.contains('active-view') && !$('#views-view')?.classList.contains('active-view')) return;
+    if ($('dialog[open]') || isEditableAppSurface(event.target) || event.target?.closest?.('select')) return;
+    const list = $('#library-view')?.classList.contains('active-view') ? $('#recent-list') : $('#view-results');
+    const ids = renderedLibraryRows(list).map((row) => row.dataset.jobId).filter(Boolean);
+    if (!ids.length) return;
+    event.preventDefault();
+    closeAllRowMenus();
+    applyMarqueeSelection(new Set(ids));
+  }
+  document.addEventListener('keydown', handleLibrarySelectAllShortcut);
   document.addEventListener('click', (event) => {
     if (event.target.closest('.row-more-menu,[data-row-menu-job-id]')) return;
     closeAllRowMenus();
@@ -3393,6 +3427,420 @@
 
   // Reader iframe, text selection and persisted annotations.
   function frameDocument() { return $('#html-preview').contentDocument; }
+
+  const readerSearchHighlightName = 'my-scholar-reader-search';
+  const readerSearchCurrentHighlightName = 'my-scholar-reader-search-current';
+  const readerSentenceHighlightName = 'my-scholar-sentence-hover';
+
+  function readerHighlightRegistry(doc = frameDocument()) {
+    const registry = doc?.defaultView?.CSS?.highlights;
+    return registry && typeof registry.set === 'function' && typeof registry.delete === 'function' ? registry : null;
+  }
+
+  function readerHighlightForRanges(doc, ranges) {
+    const HighlightConstructor = doc?.defaultView?.Highlight;
+    if (!doc || !Array.isArray(ranges) || !ranges.length || typeof HighlightConstructor !== 'function') return null;
+    try {
+      const highlight = new HighlightConstructor();
+      ranges.forEach((range) => { if (range) highlight.add(range); });
+      return highlight;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function unwrapReaderSearchMarks(doc = frameDocument()) {
+    doc?.querySelectorAll('mark.reader-search-match').forEach((mark) => {
+      const parent = mark.parentNode;
+      if (!parent) return;
+      while (mark.firstChild) parent.insertBefore(mark.firstChild, mark);
+      mark.remove();
+    });
+    doc?.querySelector('.reader-content')?.normalize();
+  }
+
+  function clearReaderSearchMatches(doc = frameDocument()) {
+    const registry = readerHighlightRegistry(doc);
+    registry?.delete(readerSearchHighlightName);
+    registry?.delete(readerSearchCurrentHighlightName);
+    unwrapReaderSearchMarks(doc);
+    readerSearchState.matches = [];
+    readerSearchState.activeIndex = -1;
+    readerSearchState.usingCustomHighlight = false;
+  }
+
+  function normalizeReaderSearchText(value) {
+    return String(value || '').replace(/\s+/gu, ' ').trim().toLocaleLowerCase();
+  }
+
+  function readerSearchRoots(doc = frameDocument()) {
+    if (!doc) return [];
+    const roots = [...doc.querySelectorAll('.reader-content h1[data-block-id], .reader-content h2[data-block-id], .reader-content h3[data-block-id], .reader-content h4[data-block-id], .reader-content h5[data-block-id], .reader-content h6[data-block-id], .reader-content p[data-block-id], .reader-content ul[data-block-id], .reader-content ol[data-block-id], .reader-content figcaption[data-translate-block-id], .reader-content .my-scholar-translation')];
+    return roots.filter((root) => !root.closest('.annotation-note-popover'));
+  }
+
+  function readerSearchMap(root, doc = frameDocument()) {
+    const nodes = textNodes(root, doc).filter((node) => {
+      const parent = node.parentElement;
+      return Boolean(parent && !parent.closest('script,style,button,input,textarea,select,summary,.annotation-note-popover,.paragraph-translate-trigger,.annotation-note-trigger') && node.nodeValue);
+    });
+    let text = '';
+    const positions = [];
+    nodes.forEach((node) => {
+      const value = String(node.nodeValue || '');
+      for (let index = 0; index < value.length; index += 1) {
+        const character = value[index];
+        if (/\s/u.test(character)) {
+          if (!text.endsWith(' ')) {
+            text += ' ';
+            positions.push([node, index]);
+          }
+          continue;
+        }
+        const lowered = character.toLocaleLowerCase();
+        for (const lowerCharacter of lowered) {
+          text += lowerCharacter;
+          positions.push([node, index]);
+        }
+      }
+    });
+    return { text, positions };
+  }
+
+  function readerSearchRangeFromMap(map, start, length, doc = frameDocument()) {
+    if (!doc || !map?.positions?.length || !Number.isInteger(start) || !Number.isInteger(length) || length < 1) return null;
+    const first = map.positions[start];
+    const last = map.positions[start + length - 1];
+    if (!first || !last) return null;
+    try {
+      const range = doc.createRange();
+      range.setStart(first[0], first[1]);
+      range.setEnd(last[0], last[1] + 1);
+      return range;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function renderReaderSearchMatches() {
+    const doc = frameDocument();
+    clearReaderSearchMatches(doc);
+    const query = normalizeReaderSearchText(readerSearchState.query);
+    if (!doc || !query || !$('#reader-view')?.classList.contains('active-view')) return;
+    const ranges = [];
+    for (const root of readerSearchRoots(doc)) {
+      const map = readerSearchMap(root, doc);
+      let cursor = 0;
+      for (;;) {
+        const start = map.text.indexOf(query, cursor);
+        if (start < 0) break;
+        const range = readerSearchRangeFromMap(map, start, query.length, doc);
+        if (range && !range.collapsed) ranges.push(range);
+        cursor = start + Math.max(1, query.length);
+      }
+    }
+    const registry = readerHighlightRegistry(doc);
+    const highlight = readerHighlightForRanges(doc, ranges);
+    if (registry && highlight) {
+      registry.set(readerSearchHighlightName, highlight);
+      readerSearchState.usingCustomHighlight = true;
+      readerSearchState.matches = ranges.map((range) => ({ range }));
+    } else {
+      const fallback = [];
+      ranges.slice().reverse().forEach((range) => {
+        try {
+          const mark = doc.createElement('mark');
+          mark.className = 'reader-search-match';
+          mark.dataset.searchMatch = 'true';
+          mark.append(range.extractContents());
+          range.insertNode(mark);
+          fallback.push(mark);
+        } catch (_) { /* A stale range is ignored; the remaining matches stay usable. */ }
+      });
+      readerSearchState.matches = fallback.reverse().map((node) => ({ node }));
+    }
+    if (readerSearchState.matches.length) readerSearchState.activeIndex = 0;
+    applyReaderSearchCurrent();
+  }
+
+  function applyReaderSearchCurrent() {
+    const doc = frameDocument();
+    const registry = readerHighlightRegistry(doc);
+    registry?.delete(readerSearchCurrentHighlightName);
+    doc?.querySelectorAll('mark.reader-search-match.is-current').forEach((node) => node.classList.remove('is-current'));
+    const current = readerSearchState.matches[readerSearchState.activeIndex];
+    if (!current) return;
+    if (readerSearchState.usingCustomHighlight && registry) {
+      const highlight = readerHighlightForRanges(doc, [current.range]);
+      if (highlight) registry.set(readerSearchCurrentHighlightName, highlight);
+    } else current.node?.classList.add('is-current');
+  }
+
+  function updateReaderSearchUI() {
+    const input = $('#reader-search-input');
+    const count = $('#reader-search-count');
+    const previous = $('#reader-search-prev');
+    const next = $('#reader-search-next');
+    const hasMatches = readerSearchState.matches.length > 0;
+    const hasQuery = Boolean(normalizeReaderSearchText(readerSearchState.query));
+    if (input && input.value !== readerSearchState.query) input.value = readerSearchState.query;
+    if (count) count.textContent = hasQuery ? (hasMatches ? `${readerSearchState.activeIndex + 1}/${readerSearchState.matches.length}` : '无匹配') : '';
+    if (previous) previous.disabled = !hasMatches;
+    if (next) next.disabled = !hasMatches;
+  }
+
+  function refreshReaderSearch() {
+    if (!readerSearchState.open) {
+      clearReaderSearchMatches();
+      updateReaderSearchUI();
+      return;
+    }
+    renderReaderSearchMatches();
+    updateReaderSearchUI();
+  }
+
+  function readerSearchNavigate(delta) {
+    const total = readerSearchState.matches.length;
+    if (!total) return;
+    readerSearchState.activeIndex = (readerSearchState.activeIndex + delta + total) % total;
+    applyReaderSearchCurrent();
+    scrollReaderSearchCurrent();
+    updateReaderSearchUI();
+  }
+
+  function scrollReaderSearchCurrent(behavior = reducedMotionQuery.matches ? 'auto' : 'smooth') {
+    const current = readerSearchState.matches[readerSearchState.activeIndex];
+    const target = current?.node || current?.range?.startContainer?.parentElement;
+    target?.scrollIntoView?.({ behavior, block: 'center', inline: 'nearest' });
+  }
+
+  function openReaderSearch({ select = true } = {}) {
+    if (!$('#reader-view')?.classList.contains('active-view')) return false;
+    const panel = $('#reader-search');
+    const input = $('#reader-search-input');
+    if (!panel || !input) return false;
+    readerSearchState.open = true;
+    panel.hidden = false;
+    refreshReaderSearch();
+    input.focus({ preventScroll: true });
+    if (select) input.select();
+    scrollReaderSearchCurrent('auto');
+    return true;
+  }
+
+  function closeReaderSearch({ reset = false } = {}) {
+    readerSearchState.open = false;
+    clearReaderSearchMatches();
+    if (reset) {
+      readerSearchState.query = '';
+      const input = $('#reader-search-input');
+      if (input) input.value = '';
+    }
+    const panel = $('#reader-search');
+    if (panel) panel.hidden = true;
+    updateReaderSearchUI();
+  }
+
+  function readerSearchShortcut(event) {
+    return !event.altKey && !event.shiftKey && (event.metaKey || event.ctrlKey) && String(event.key || '').toLowerCase() === 'f';
+  }
+
+  function handleReaderSearchShortcut(event) {
+    if (event.defaultPrevented || event.isComposing || !$('#reader-view')?.classList.contains('active-view')) return false;
+    if (readerSearchShortcut(event) && !isEditableAppSurface(event.target)) {
+      event.preventDefault();
+      event.stopPropagation();
+      openReaderSearch();
+      return true;
+    }
+    if (event.key === 'Escape' && readerSearchState.open && !isEditableAppSurface(event.target)) {
+      event.preventDefault();
+      event.stopPropagation();
+      closeReaderSearch();
+      return true;
+    }
+    return false;
+  }
+
+  $('#reader-search-input')?.addEventListener('input', (event) => {
+    readerSearchState.query = event.target.value;
+    refreshReaderSearch();
+    scrollReaderSearchCurrent('auto');
+  });
+  $('#reader-search-input')?.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      closeReaderSearch();
+    } else if (event.key === 'Enter') {
+      event.preventDefault();
+      readerSearchNavigate(event.shiftKey ? -1 : 1);
+    }
+  });
+  $('#reader-search-prev')?.addEventListener('click', () => readerSearchNavigate(-1));
+  $('#reader-search-next')?.addEventListener('click', () => readerSearchNavigate(1));
+  $('#reader-search-close')?.addEventListener('click', () => closeReaderSearch());
+  document.addEventListener('keydown', handleReaderSearchShortcut, true);
+
+  function readerSentenceSegments(value) {
+    const text = String(value || '');
+    const segments = [];
+    let start = 0;
+    const isBoundary = (index) => {
+      const character = text[index];
+      if (!character || !/[.!?。！？；;\n]/u.test(character)) return false;
+      if (character === '.' && /\d/u.test(text[index - 1] || '') && /\d/u.test(text[index + 1] || '')) return false;
+      return true;
+    };
+    const push = (from, to) => {
+      const raw = text.slice(from, to);
+      const leading = raw.search(/\S/u);
+      if (leading < 0) return;
+      const trailing = raw.replace(/\s+$/u, '').length;
+      const segmentStart = from + leading;
+      const segmentEnd = from + trailing;
+      if (segmentEnd > segmentStart) segments.push({ start: segmentStart, end: segmentEnd });
+    };
+    for (let index = 0; index < text.length; index += 1) {
+      if (!isBoundary(index)) continue;
+      let end = index + 1;
+      while (end < text.length && /[.!?。！？；;]/u.test(text[end])) end += 1;
+      push(start, end);
+      start = end;
+      index = end - 1;
+    }
+    push(start, text.length);
+    return segments;
+  }
+
+  function sentenceRanges(root, segments, doc = frameDocument()) {
+    return (segments || []).map((segment) => rangeAtOffsets(root, segment.start, segment.end, doc)).filter((range) => range && !range.collapsed);
+  }
+
+  function clearReaderSentenceHover(doc = frameDocument()) {
+    if (readerSentenceState.pointerFrame) {
+      const view = readerSentenceState.doc?.defaultView || doc?.defaultView;
+      view?.cancelAnimationFrame?.(readerSentenceState.pointerFrame);
+      readerSentenceState.pointerFrame = 0;
+    }
+    readerSentenceState.pendingPoint = null;
+    const registry = readerHighlightRegistry(doc);
+    registry?.delete(readerSentenceHighlightName);
+    doc?.querySelectorAll('.reader-sentence-hover-fallback').forEach((node) => node.classList.remove('reader-sentence-hover-fallback'));
+    readerSentenceState.activePairId = '';
+    readerSentenceState.usingCustomHighlight = false;
+  }
+
+  function rebuildReaderSentencePairs(doc = frameDocument()) {
+    clearReaderSentenceHover(readerSentenceState.doc || doc);
+    readerSentenceState.doc = doc || null;
+    readerSentenceState.pairs = [];
+    if (!doc) return;
+    const sources = [...doc.querySelectorAll('.reader-content [data-block-id], .reader-content [data-translate-block-id]')]
+      .filter((block) => !block.classList.contains('my-scholar-translation') && !block.closest('.annotation-note-popover'));
+    sources.forEach((source) => {
+      const blockId = String(source.dataset.blockId || source.dataset.translateBlockId || '');
+      if (!blockId) return;
+      const translation = source.nextElementSibling?.matches?.(`.my-scholar-translation[data-for="${cssEscape(blockId)}"]`)
+        ? source.nextElementSibling
+        : null;
+      if (!translation || translation.classList.contains('is-pending') || translation.classList.contains('is-error')) return;
+      const sourceSegments = readerSentenceSegments(canonicalBlockText(source, doc));
+      const translationSegments = readerSentenceSegments(canonicalBlockText(translation, doc));
+      const sourceRanges = sentenceRanges(source, sourceSegments, doc);
+      const translationRanges = sentenceRanges(translation, translationSegments, doc);
+      if (!sourceRanges.length || !translationRanges.length) return;
+      sourceRanges.forEach((sourceRange, sourceIndex) => {
+        const targetStart = Math.floor(sourceIndex * translationRanges.length / sourceRanges.length);
+        const targetEnd = Math.max(targetStart + 1, Math.floor((sourceIndex + 1) * translationRanges.length / sourceRanges.length));
+        const targets = translationRanges.slice(targetStart, Math.min(translationRanges.length, targetEnd));
+        if (!targets.length) targets.push(translationRanges.at(-1));
+        readerSentenceState.pairs.push({
+          id: `${blockId}:${sourceIndex}`,
+          source,
+          translation,
+          sourceRange,
+          translationRanges: targets,
+        });
+      });
+    });
+  }
+
+  function readerSentencePairAtPoint(doc, x, y) {
+    if (!doc || !readerSentenceState.pairs.length) return null;
+    let point = null;
+    try {
+      point = doc.caretRangeFromPoint?.(x, y) || null;
+      if (!point && doc.caretPositionFromPoint) {
+        const caret = doc.caretPositionFromPoint(x, y);
+        if (caret?.offsetNode) {
+          point = doc.createRange();
+          point.setStart(caret.offsetNode, caret.offset);
+          point.collapse(true);
+        }
+      }
+    } catch (_) { point = null; }
+    if (!point) return null;
+    const RangeConstructor = doc.defaultView?.Range;
+    if (!RangeConstructor) return null;
+    for (const pair of readerSentenceState.pairs) {
+      const ranges = [pair.sourceRange, ...pair.translationRanges];
+      if (ranges.some((range) => {
+        try {
+          return range.compareBoundaryPoints(RangeConstructor.START_TO_START, point) <= 0
+            && range.compareBoundaryPoints(RangeConstructor.END_TO_END, point) >= 0;
+        } catch (_) { return false; }
+      })) return pair;
+    }
+    return null;
+  }
+
+  function setReaderSentenceHover(pair) {
+    const doc = readerSentenceState.doc || frameDocument();
+    if (!doc) return;
+    if (!pair) {
+      clearReaderSentenceHover(doc);
+      return;
+    }
+    if (readerSentenceState.activePairId === pair.id) return;
+    clearReaderSentenceHover(doc);
+    const ranges = [pair.sourceRange, ...pair.translationRanges].filter(Boolean);
+    const registry = readerHighlightRegistry(doc);
+    const highlight = readerHighlightForRanges(doc, ranges);
+    if (registry && highlight) {
+      registry.set(readerSentenceHighlightName, highlight);
+      readerSentenceState.usingCustomHighlight = true;
+    } else {
+      pair.source.classList.add('reader-sentence-hover-fallback');
+      pair.translation.classList.add('reader-sentence-hover-fallback');
+      readerSentenceState.usingCustomHighlight = false;
+    }
+    readerSentenceState.activePairId = pair.id;
+  }
+
+  function installReaderSentenceHover(doc = frameDocument()) {
+    if (!doc || doc.documentElement.dataset.sentenceHoverReady === 'true') return;
+    doc.documentElement.dataset.sentenceHoverReady = 'true';
+    const schedule = (event) => {
+      if (event.target?.closest?.('.annotation-note-popover,button,input,textarea,select,summary')) {
+        setReaderSentenceHover(null);
+        return;
+      }
+      readerSentenceState.pendingPoint = { x: event.clientX, y: event.clientY };
+      if (readerSentenceState.pointerFrame) return;
+      const requestFrame = doc.defaultView?.requestAnimationFrame;
+      if (typeof requestFrame !== 'function') return;
+      readerSentenceState.pointerFrame = requestFrame.call(doc.defaultView, () => {
+        readerSentenceState.pointerFrame = 0;
+        const point = readerSentenceState.pendingPoint;
+        readerSentenceState.pendingPoint = null;
+        const pair = point ? readerSentencePairAtPoint(doc, point.x, point.y) : null;
+        setReaderSentenceHover(pair);
+      });
+    };
+    doc.addEventListener('pointermove', schedule, { passive: true });
+    doc.addEventListener('mouseleave', () => setReaderSentenceHover(null), { passive: true });
+    doc.defaultView?.addEventListener('blur', () => setReaderSentenceHover(null), { passive: true });
+  }
   function readerURLIdentity(value) {
     try {
       const url = new URL(String(value || ''), window.location.href);
@@ -3422,6 +3870,10 @@
   function beginReaderMount(jobId, source) {
     const frame = $('#html-preview');
     const url = readerDocumentURL(source);
+    closeReaderSearch({ reset: true });
+    clearReaderSentenceHover(frameDocument());
+    readerSentenceState.doc = null;
+    readerSentenceState.pairs = [];
     const restoreLocation = normalizedReadingLocation(readingLocationsState.locations[jobId]);
     if (readerMount?.saveTimer) window.clearTimeout(readerMount.saveTimer);
     if (readerMount?.saveMaxTimer) window.clearTimeout(readerMount.saveMaxTimer);
@@ -4814,6 +5266,15 @@
     });
   }
 
+  function inferReaderSectionLevel(title, tagLevel) {
+    const value = String(title || '').replace(/\s+/gu, ' ').trim();
+    const numbered = value.match(/^(\d+(?:\.\d+)*|[A-Z](?:\.\d+)*|[IVX]+)(?:[.)])?\s+/iu);
+    if (numbered) return Math.min(6, Math.max(1, numbered[1].split('.').length));
+    if (/^(?:abstract|摘要|references?|bibliography|acknowledg(?:e)?ment|appendix(?:\s|$)|附录)/iu.test(value)) return 1;
+    const parsed = Number(tagLevel);
+    return Math.min(6, Math.max(1, Number.isFinite(parsed) ? parsed : 2));
+  }
+
   function buildReaderIndexes() {
     const doc = frameDocument();
     if (!doc) return [];
@@ -4822,7 +5283,7 @@
       const node = heading.matches('[data-block-id]') ? heading : heading.closest('[data-block-id]');
       const blockId = String(node?.dataset?.blockId || '');
       const title = String(heading.textContent || '').replace(/\s+/g, ' ').trim();
-      const level = Number(heading.tagName.slice(1));
+      const level = inferReaderSectionLevel(title, Number(heading.tagName.slice(1)));
       if (!node || heading.matches('h1.paper-title') || !readerBlockIdPattern.test(blockId) || seen.has(blockId) || !title || title.length > 180) return null;
       if (/^(?:keywords?|ccs concepts?)\b/iu.test(title)) return null;
       seen.add(blockId);
@@ -4833,14 +5294,24 @@
     const rail = $('#reader-chapter-rail');
     const railList = $('#reader-chapter-list');
     if (outline) {
-      outline.innerHTML = readerSections.length ? readerSections.map((section, index) => `<button class="outline-item" type="button" data-reader-section-index="${index}"><small>${section.level}</small><span>${escapeHTML(section.title.slice(0, 100))}</span></button>`).join('') : '<div class="chat-empty">没有检测到章节标题。</div>';
+      outline.innerHTML = readerSections.length ? readerSections.map((section, index) => {
+        const level = Math.min(6, Math.max(1, Number(section.level) || 1));
+        const indent = Math.min(4, level - 1) * 9;
+        return `<button class="outline-item" type="button" data-reader-section-index="${index}" data-outline-level="${level}" style="--outline-indent:${indent}px"><small>${level}</small><span>${escapeHTML(section.title.slice(0, 100))}</span></button>`;
+      }).join('') : '<div class="chat-empty">没有检测到章节标题。</div>';
       bindReaderSectionButtons(outline);
     }
     if (rail && railList) {
       hideChapterRailTooltip();
       rail.hidden = !readerSections.length;
       railList.dataset.sectionCount = String(readerSections.length);
-      railList.innerHTML = readerSections.map((section, index) => `<div class="reader-chapter-list-item" role="listitem"><button class="reader-chapter-item" type="button" data-reader-section-index="${index}" data-reader-section-title="${escapeHTML(section.title)}" aria-label="跳转到章节：${escapeHTML(section.title)}" style="--reader-section-indent:${Math.min(3, Math.max(0, section.level - 1)) * 8}px;--reader-section-rail-indent:${Math.min(3, Math.max(0, section.level - 1)) * 3}px"><span class="reader-chapter-dot" aria-hidden="true"></span><span class="reader-chapter-title">${escapeHTML(section.title)}</span></button></div>`).join('');
+      railList.innerHTML = readerSections.map((section, index) => {
+        const level = Math.min(6, Math.max(1, Number(section.level) || 1));
+        const indent = Math.min(3, level - 1) * 8;
+        const railIndent = Math.min(3, level - 1) * 3;
+        const barWidth = [23, 18, 14, 11, 8, 6][level - 1] || 6;
+        return `<div class="reader-chapter-list-item" role="listitem"><button class="reader-chapter-item" type="button" data-reader-section-index="${index}" data-reader-section-level="${level}" data-reader-section-title="${escapeHTML(section.title)}" aria-label="跳转到章节：${escapeHTML(section.title)}" style="--reader-section-indent:${indent}px;--reader-section-rail-indent:${railIndent}px;--reader-section-bar-width:${barWidth}px"><span class="reader-chapter-dot" aria-hidden="true"></span><span class="reader-chapter-title">${escapeHTML(section.title)}</span></button></div>`;
+      }).join('');
       bindReaderSectionButtons(railList, { rail: true });
       if (!readerSections.length) setChapterRailOpen(false);
     }
@@ -5068,6 +5539,34 @@
       runtimeStyle = doc.createElement('style');
       runtimeStyle.id = 'my-scholar-annotation-runtime-style';
       runtimeStyle.textContent = `
+        ::highlight(${readerSearchHighlightName}) {
+          background:color-mix(in srgb,var(--accent,#d97706) 12%,transparent);
+          color:inherit;
+        }
+        ::highlight(${readerSearchCurrentHighlightName}) {
+          background:color-mix(in srgb,var(--accent,#d97706) 24%,transparent);
+          color:inherit;
+        }
+        ::highlight(${readerSentenceHighlightName}) {
+          background:color-mix(in srgb,var(--accent,#d97706) 10%,transparent);
+          color:inherit;
+          text-decoration:underline;
+          text-decoration-color:color-mix(in srgb,var(--accent,#d97706) 28%,transparent);
+          text-decoration-thickness:1px;
+          text-underline-offset:.12em;
+        }
+        mark.reader-search-match {
+          border-radius:.16em;
+          background:color-mix(in srgb,var(--accent,#d97706) 12%,transparent);
+          color:inherit;
+        }
+        mark.reader-search-match.is-current {
+          background:color-mix(in srgb,var(--accent,#d97706) 24%,transparent);
+        }
+        .reader-sentence-hover-fallback {
+          border-radius:.16em;
+          background:color-mix(in srgb,var(--accent,#d97706) 8%,transparent);
+        }
         .annotation-note-editor[contenteditable="true"],
         .annotation-note-editor[contenteditable="true"] * {
           -webkit-user-select:text!important;
@@ -5462,6 +5961,7 @@
     doc.addEventListener('click', closeHostTypographyPopover, { passive: true, capture: true });
     ['wheel', 'touchstart', 'pointerdown'].forEach((eventName) => doc.defaultView?.addEventListener(eventName, (event) => markReaderUserInteraction(mount, event), { passive: true, capture: true }));
     doc.defaultView?.addEventListener('scroll', () => {
+      clearReaderSentenceHover(doc);
       closeImageContextMenu();
       if (doc.getSelection()?.toString().trim()) showSelection();
       else clearSelectionPopover({ clearState: true });
@@ -5540,6 +6040,7 @@
       if (!event.target.closest?.('.annotation-note-popover')) closeInlineAnnotation(doc);
     });
     doc.addEventListener('keydown', (event) => {
+      if (handleReaderSearchShortcut(event)) return;
       markReaderUserInteraction(mount, event);
       if (event.key === 'Escape' && $('#reader-chapter-rail')?.classList.contains('is-open')) {
         event.preventDefault();
@@ -5570,6 +6071,9 @@
     buildReaderIndexes();
     installCitationHoverPreviews(doc);
     renderFrameAnnotations();
+    installReaderSentenceHover(doc);
+    rebuildReaderSentencePairs(doc);
+    refreshReaderSearch();
     applyAppearance();
     applyHighlightColor();
     ensureTitleTranslation();
@@ -6036,6 +6540,8 @@
       visualAnnotations.set(key, annotation);
     });
     visualAnnotations.forEach((annotation) => applyMark(annotation));
+    rebuildReaderSentencePairs(doc);
+    if (readerSearchState.open && doc === frameDocument()) refreshReaderSearch();
   }
 
   async function saveAnnotation(kind, { withNote = false } = {}) {
@@ -6764,6 +7270,8 @@
     }
     block.insertAdjacentElement('afterend', node);
     if (state.annotations.length && doc === frameDocument()) renderFrameAnnotations();
+    else rebuildReaderSentencePairs(doc);
+    if (doc === frameDocument()) refreshReaderSearch();
     return node;
   }
 

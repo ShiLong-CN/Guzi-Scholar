@@ -134,6 +134,68 @@ let browserSession;
   if (/<think>/i.test(translatedText)) throw new Error('Thinking trace leaked into the rendered translation');
   if (await translation.locator(':scope > span').count()) throw new Error('Translation still rendered a separate 译 badge');
 
+  const searchQuery = await frame.locator(`[data-block-id="${blockId}"]`).evaluate((node) => {
+    const value = (node.textContent || '').trim().match(/[A-Za-z][A-Za-z0-9-]{2,}/u)?.[0];
+    return value || (node.textContent || '').trim().slice(0, 3);
+  });
+  await page.keyboard.press('Control+f');
+  await page.locator('#reader-search:not([hidden])').waitFor();
+  await page.locator('#reader-search-input').fill(searchQuery);
+  await page.locator('#reader-search-count').waitFor({ state: 'visible' });
+  const searchCount = await page.locator('#reader-search-count').textContent();
+  if (!/^\d+\/\d+$/u.test(String(searchCount || '').trim())) throw new Error(`Reader search did not report match count (${searchCount})`);
+  const searchState = await frame.locator('body').evaluate(() => ({
+    custom: Boolean(document.defaultView.CSS?.highlights?.has('my-scholar-reader-search')),
+    fallback: document.querySelectorAll('mark.reader-search-match').length,
+  }));
+  if (!searchState.custom && !searchState.fallback) throw new Error('Reader search did not render a visible match');
+  await page.keyboard.press('Escape');
+  await page.locator('#reader-search[hidden]').waitFor({ state: 'attached' });
+
+  const sentenceHoverState = await frame.locator(`[data-block-id="${blockId}"]`).evaluate((source) => {
+    const doc = source.ownerDocument;
+    const walker = doc.createTreeWalker(source, NodeFilter.SHOW_TEXT);
+    let textNode;
+    while ((textNode = walker.nextNode()) && !textNode.nodeValue.trim()) {}
+    if (!textNode) return { ready: false, reason: 'source has no text node' };
+    const range = doc.createRange();
+    range.selectNodeContents(textNode);
+    const rect = [...range.getClientRects()].find((item) => item.width && item.height);
+    if (!rect) return { ready: false, reason: 'source text has no layout rect' };
+    doc.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, clientX: rect.left + Math.min(4, rect.width / 2), clientY: rect.top + rect.height / 2 }));
+    return { ready: true };
+  });
+  if (!sentenceHoverState.ready) throw new Error(`Sentence hover fixture unavailable (${sentenceHoverState.reason})`);
+  await frame.locator('body').evaluate(async () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  const hoverState = await frame.locator('body').evaluate(() => ({
+    custom: Boolean(document.defaultView.CSS?.highlights?.has('my-scholar-sentence-hover')),
+    customRanges: document.defaultView.CSS?.highlights?.get('my-scholar-sentence-hover')?.size || 0,
+    fallback: document.querySelectorAll('.reader-sentence-hover-fallback').length,
+  }));
+  if ((hoverState.custom && hoverState.customRanges < 2) || (!hoverState.custom && hoverState.fallback < 2)) throw new Error(`Hovering a sentence did not link source and translation (${JSON.stringify(hoverState)})`);
+
+  const reverseHoverState = await frame.locator(`.my-scholar-translation[data-for="${blockId}"]`).evaluate((translation) => {
+    const doc = translation.ownerDocument;
+    const walker = doc.createTreeWalker(translation, NodeFilter.SHOW_TEXT);
+    let textNode;
+    while ((textNode = walker.nextNode()) && !textNode.nodeValue.trim()) {}
+    if (!textNode) return { ready: false, reason: 'translation has no text node' };
+    const range = doc.createRange();
+    range.selectNodeContents(textNode);
+    const rect = [...range.getClientRects()].find((item) => item.width && item.height);
+    if (!rect) return { ready: false, reason: 'translation text has no layout rect' };
+    doc.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, clientX: rect.left + Math.min(4, rect.width / 2), clientY: rect.top + rect.height / 2 }));
+    return { ready: true };
+  });
+  if (!reverseHoverState.ready) throw new Error(`Reverse sentence hover fixture unavailable (${reverseHoverState.reason})`);
+  await frame.locator('body').evaluate(async () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  const reverseHoverResult = await frame.locator('body').evaluate(() => ({
+    custom: Boolean(document.defaultView.CSS?.highlights?.has('my-scholar-sentence-hover')),
+    customRanges: document.defaultView.CSS?.highlights?.get('my-scholar-sentence-hover')?.size || 0,
+    fallback: document.querySelectorAll('.reader-sentence-hover-fallback').length,
+  }));
+  if ((reverseHoverResult.custom && reverseHoverResult.customRanges < 2) || (!reverseHoverResult.custom && reverseHoverResult.fallback < 2)) throw new Error(`Hovering a translation did not link source and translation (${JSON.stringify(reverseHoverResult)})`);
+
   const boundaryBlockId = translationSpacingFixture.boundary.sourceId;
   let boundaryTranslation = frame.locator(`.my-scholar-translation[data-for="${boundaryBlockId}"]:not(.is-pending):not(.is-error)`);
   if (!(await boundaryTranslation.count())) {
