@@ -14,7 +14,7 @@ from component_manager import (
     ComponentManifest,
     PRODUCTION_COMPONENT_CATALOG,
 )
-from mineru_discovery import MineruCandidate, discover_mineru, discover_mineru_candidates
+from mineru_discovery import MineruCandidate, clear_discovery_cache, discover_mineru, discover_mineru_candidates
 from pipeline import process_pdf
 
 
@@ -250,6 +250,8 @@ class LocalMineruProvider:
         return self.manager.cancel_install()
 
     def discover_external(self) -> Dict[str, Any]:
+        # A manual scan is an explicit request to refresh the automatic result.
+        clear_discovery_cache()
         candidates, failures = discover_mineru_candidates(
             project_root=self.project_root,
             explicit_scan=True,

@@ -52,6 +52,17 @@ class LayoutPipelineTest(unittest.TestCase):
         ), patch("layout_pipeline.shutil.which", return_value="/opt/homebrew/bin/pandoc"):
             self.assertIsNone(MathRenderer().pandoc)
 
+    def test_math_fallback_does_not_duplicate_display_tag(self) -> None:
+        with patch.object(sys, "frozen", True, create=True), patch.dict(
+            os.environ, {"MY_SCHOLAR_PANDOC": ""}
+        ):
+            renderer = MathRenderer()
+            rendered = renderer.render(r"x = y\tag{7}", display=True)
+        self.assertIn("math-fallback", rendered)
+        self.assertIn("x = y", rendered)
+        self.assertNotIn(r"\tag{7}", rendered)
+        self.assertIn("<span class=\"equation-number\">(7)</span>", rendered)
+
     def test_mineru_cancel_terminates_its_process_group(self) -> None:
         cancel = threading.Event()
 

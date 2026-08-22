@@ -16,6 +16,9 @@ let browserSession;
   const translationPostBlocks = [];
   const translationPostPayloads = [];
   const translationRecords = new Map();
+  let translationInFlight = 0;
+  let fullTranslationStarted = false;
+  let fullTranslationPeakConcurrency = 0;
   page.on('pageerror', (error) => errors.push(`pageerror: ${error.message}`));
   page.on('console', (message) => { if (message.type() === 'error') errors.push(`console: ${message.text()}`); });
   page.on('request', (request) => {
@@ -36,25 +39,32 @@ let browserSession;
     await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ translations: records }) });
   });
   await page.route('**/api/jobs/*/translate', async (route) => {
-    const request = route.request();
-    const match = new URL(request.url()).pathname.match(/^\/api\/jobs\/([^/]+)\/translate$/u);
-    const payload = request.postDataJSON();
-    const result = {
-      text: `测试译文：${String(payload.text || '')}`,
-      block_id: payload.block_id || '',
-      source_hash: payload.source_hash || '',
-      target_language: payload.target_language || '中文',
-      formulas: Array.isArray(payload.formulas) ? payload.formulas : [],
-      profile_id: 'translation-smoke-profile',
-      cached: false,
-    };
-    if (match && result.block_id) {
-      const records = translationRecords.get(match[1]) || [];
-      const index = records.findIndex((record) => record.block_id === result.block_id && record.source_hash === result.source_hash && record.target_language === result.target_language && record.profile_id === result.profile_id);
-      if (index >= 0) records[index] = result; else records.push(result);
-      translationRecords.set(match[1], records);
+    translationInFlight += 1;
+    if (fullTranslationStarted) fullTranslationPeakConcurrency = Math.max(fullTranslationPeakConcurrency, translationInFlight);
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const request = route.request();
+      const match = new URL(request.url()).pathname.match(/^\/api\/jobs\/([^/]+)\/translate$/u);
+      const payload = request.postDataJSON();
+      const result = {
+        text: `测试译文：${String(payload.text || '')}`,
+        block_id: payload.block_id || '',
+        source_hash: payload.source_hash || '',
+        target_language: payload.target_language || '中文',
+        formulas: Array.isArray(payload.formulas) ? payload.formulas : [],
+        profile_id: 'translation-smoke-profile',
+        cached: false,
+      };
+      if (match && result.block_id) {
+        const records = translationRecords.get(match[1]) || [];
+        const index = records.findIndex((record) => record.block_id === result.block_id && record.source_hash === result.source_hash && record.target_language === result.target_language && record.profile_id === result.profile_id);
+        if (index >= 0) records[index] = result; else records.push(result);
+        translationRecords.set(match[1], records);
+      }
+      await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ result }) });
+    } finally {
+      translationInFlight -= 1;
     }
-    await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ result }) });
   });
   await page.route('**/api/jobs/*/auto-highlights', async (route) => route.fulfill({
     contentType: 'application/json',
@@ -207,6 +217,7 @@ let browserSession;
   }, blockId);
   if (!placedAfterSource) throw new Error('Translation was not inserted directly after its source paragraph or caption');
 
+  fullTranslationStarted = true;
   await page.locator('#full-translate-button').click();
   // A cache-only run can finish before Playwright observes the transient
   // visible state; accept either the visible panel or its completed value.
@@ -226,6 +237,7 @@ let browserSession;
     width: node.firstElementChild?.style.width || '',
   }));
   if (progress.value !== '100' || progress.width !== '100%') throw new Error('Full-translation progress bar did not reach 100%');
+  if (fullTranslationPeakConcurrency !== 3) throw new Error(`Full translation did not use exactly three concurrent requests (peak ${fullTranslationPeakConcurrency})`);
   const translatableCaptions = await frame.locator('figcaption[data-translate-block-id]').evaluateAll((captions) => captions.filter((caption) => {
     const text = String(caption.textContent || '').replace(/译\s*$/u, '').trim();
     return text.length >= 8 && !caption.closest('.references');
@@ -259,7 +271,7 @@ let browserSession;
     throw new Error(`A repeated full translation issued ${translationPostCount - postCountAfterCompletedRun} unnecessary model requests (${repeated.join(', ')})`);
   }
 
-  console.log(JSON.stringify({ blockId, titleBlockId, formulaBlockId, titleTranslated: true, metadataSkipped: true, inlineFormulaRendered: true, captionTranslations, listTranslations, translatedText, translationSpacing: { ...translationSpacing, sourceGapRatio, followingGapDelta }, specialTokenPreserved: tokenTranslationText.includes('[I_CLS]'), cacheRestored: true, repeatedFullTranslationRequests: 0, placedAfterSource: true, progress, errors }));
+  console.log(JSON.stringify({ blockId, titleBlockId, formulaBlockId, titleTranslated: true, metadataSkipped: true, inlineFormulaRendered: true, captionTranslations, listTranslations, translatedText, translationSpacing: { ...translationSpacing, sourceGapRatio, followingGapDelta }, specialTokenPreserved: tokenTranslationText.includes('[I_CLS]'), cacheRestored: true, fullTranslationPeakConcurrency, repeatedFullTranslationRequests: 0, placedAfterSource: true, progress, errors }));
   if (errors.length) process.exitCode = 1;
 })().catch((error) => {
   console.error(error);

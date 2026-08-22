@@ -503,10 +503,11 @@ function backendExecutable(projectRoot) {
 function packagedToolchainEnvironment() {
   if (!app.isPackaged) return {};
   const jar = path.join(process.resourcesPath, 'toolchain', 'opendataloader-pdf-cli-0.0.0.jar');
+  const pandoc = path.join(process.resourcesPath, 'toolchain', 'pandoc', 'pandoc');
   const java = path.join(process.resourcesPath, 'java', 'bin', 'java');
   const renderer = path.join(process.resourcesPath, 'toolchain', 'pdf-renderer');
   const caBundle = path.join(process.resourcesPath, 'python-server', 'ca-certificates.crt');
-  if (!fs.existsSync(jar) || !fs.existsSync(java) || !fs.existsSync(renderer)) {
+  if (!fs.existsSync(jar) || !fs.existsSync(pandoc) || !fs.existsSync(java) || !fs.existsSync(renderer)) {
     throw new Error('应用包缺少 PDF 转换组件。请重新安装谷子学术。');
   }
   let caBundleReady = false;
@@ -521,6 +522,7 @@ function packagedToolchainEnvironment() {
   }
   return {
     MY_SCHOLAR_ODL_JAR: jar,
+    MY_SCHOLAR_PANDOC: pandoc,
     MY_SCHOLAR_JAVA: java,
     MY_SCHOLAR_PDF_RENDERER_CLASSPATH: `${renderer}${path.delimiter}${jar}`,
     SSL_CERT_FILE: caBundle,

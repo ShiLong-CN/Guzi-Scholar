@@ -333,20 +333,32 @@
               <article class="ai-credential-card" data-ai-config="translation">
                 <div class="ai-credential-heading"><span class="ai-service-icon" aria-hidden="true">译</span><div><h3>翻译服务</h3><p>选区、段落与全文翻译</p></div></div>
                 <label class="settings-field">Base URL<input id="setting-translation-base-url" type="url" inputmode="url" autocomplete="url" placeholder="例如：https://api.example.com/v1"></label>
-                <label class="settings-field">API Key<input id="setting-translation-api-key" type="password" autocomplete="off" placeholder="留空保持已保存的密钥"></label>
+                <div class="settings-field settings-field-with-action">
+                  <label for="setting-translation-api-key">API Key</label>
+                  <div class="settings-input-action">
+                    <input id="setting-translation-api-key" type="password" autocomplete="off" placeholder="留空保持已保存的密钥">
+                    <button id="setting-translation-clear-key" class="secondary-button compact-button danger-button settings-clear-key" data-ai-clear-key="translation" type="button" aria-label="清除已保存的翻译服务 API Key" title="清除已保存的翻译服务 API Key">清除</button>
+                  </div>
+                </div>
                 <label class="settings-field">模型<input id="setting-translation-model" type="text" autocomplete="off" placeholder="例如：qwen-mt-plus"></label>
+                <label class="settings-field">翻译协议<select id="setting-translation-mode" class="settings-protocol-select"><option value="qwen-mt">专用翻译接口（qwen-mt）</option><option value="chat">通用 Chat 模型</option></select></label>
+                <p class="settings-field-hint">专用模型使用 translation_options；通用模型使用严格的 Chat 翻译提示词。</p>
                 <div class="ai-credential-actions"><button class="secondary-button compact-button" data-ai-models="translation" type="button">查询模型</button><button class="secondary-button compact-button" data-ai-reuse-source="translation" data-ai-reuse-target="chat" type="button">复用到文章助手</button></div>
                 <div class="ai-model-picker" id="setting-translation-model-picker" hidden><label class="settings-field">筛选模型<input id="setting-translation-model-filter" type="search" autocomplete="off" placeholder="输入关键词筛选"></label><select id="setting-translation-model-list" size="5" aria-label="翻译服务模型列表"></select><small id="setting-translation-model-status" role="status"></small></div>
-                <label class="settings-checkbox"><input id="setting-translation-clear-key" type="checkbox"><span>清除已保存的 API Key</span></label>
               </article>
               <article class="ai-credential-card" data-ai-config="chat">
                 <div class="ai-credential-heading"><span class="ai-service-icon" aria-hidden="true">AI</span><div><h3>文章助手</h3><p>Chat、阅读重点与内容分析</p></div></div>
                 <label class="settings-field">Base URL<input id="setting-chat-base-url" type="url" inputmode="url" autocomplete="url" placeholder="例如：https://api.example.com/v1"></label>
-                <label class="settings-field">API Key<input id="setting-chat-api-key" type="password" autocomplete="off" placeholder="留空保持已保存的密钥"></label>
+                <div class="settings-field settings-field-with-action">
+                  <label for="setting-chat-api-key">API Key</label>
+                  <div class="settings-input-action">
+                    <input id="setting-chat-api-key" type="password" autocomplete="off" placeholder="留空保持已保存的密钥">
+                    <button id="setting-chat-clear-key" class="secondary-button compact-button danger-button settings-clear-key" data-ai-clear-key="chat" type="button" aria-label="清除已保存的文章助手 API Key" title="清除已保存的文章助手 API Key">清除</button>
+                  </div>
+                </div>
                 <label class="settings-field">模型<input id="setting-chat-model" type="text" autocomplete="off" placeholder="例如：gpt-4o-mini"></label>
                 <div class="ai-credential-actions"><button class="secondary-button compact-button" data-ai-models="chat" type="button">查询模型</button><button class="secondary-button compact-button" data-ai-reuse-source="chat" data-ai-reuse-target="translation" type="button">复用到翻译服务</button></div>
                 <div class="ai-model-picker" id="setting-chat-model-picker" hidden><label class="settings-field">筛选模型<input id="setting-chat-model-filter" type="search" autocomplete="off" placeholder="输入关键词筛选"></label><select id="setting-chat-model-list" size="5" aria-label="文章助手模型列表"></select><small id="setting-chat-model-status" role="status"></small></div>
-                <label class="settings-checkbox"><input id="setting-chat-clear-key" type="checkbox"><span>清除已保存的 API Key</span></label>
               </article>
             </div>
             <div id="ai-status-overview" class="ai-status-overview is-unknown" role="status" aria-live="polite">
@@ -390,7 +402,7 @@
               <p id="update-release-notes"></p>
               <code id="update-release-sha" title="安装包 SHA-256"></code>
             </div>
-            <small class="settings-gateway-hint">当前 macOS Preview 使用 ad-hoc 签名且未经过 Apple 公证，只提供主动检查和浏览器下载；首次打开可能需要在 Finder 中右键“打开”，不会在应用内自动替换。</small>
+            <small class="settings-gateway-hint">当前 macOS 发布包使用 ad-hoc 签名且未经过 Apple 公证，只提供主动检查和浏览器下载；首次打开可能需要在 Finder 中右键“打开”，不会在应用内自动替换。</small>
           </section>
         </form>
       </div>

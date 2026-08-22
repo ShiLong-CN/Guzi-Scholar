@@ -10,7 +10,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from mineru_discovery import discover_mineru, discover_mineru_candidates, scan_mineru  # noqa: E402
+from mineru_discovery import clear_discovery_cache, discover_mineru, discover_mineru_candidates, scan_mineru  # noqa: E402
 
 
 def write_mineru(path: Path, *, interpreter: str = sys.executable) -> None:
@@ -25,6 +25,9 @@ def write_mineru(path: Path, *, interpreter: str = sys.executable) -> None:
 
 
 class MineruDiscoveryTest(unittest.TestCase):
+    def tearDown(self) -> None:
+        clear_discovery_cache()
+
     def test_shared_apps_desktop_layout_discovers_workspace_toolchain(self) -> None:
         with tempfile.TemporaryDirectory(prefix="guzi-mineru-discovery-") as temp:
             workspace = Path(temp)
@@ -88,6 +91,33 @@ class MineruDiscoveryTest(unittest.TestCase):
             )
             self.assertEqual(candidates, [])
             self.assertEqual(diagnostics, [])
+
+    def test_automatic_discovery_uses_ttl_cache_and_explicit_invalidation(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="guzi-mineru-cache-") as temp:
+            project = Path(temp) / "project"
+            executable = project / "pdf-tools/envs/mineru/bin/mineru"
+            project.mkdir(parents=True)
+            write_mineru(executable)
+            clock_value = [100.0]
+            clock = lambda: clock_value[0]
+            clear_discovery_cache()
+            from unittest.mock import patch
+
+            with patch("mineru_discovery.scan_mineru", wraps=scan_mineru) as scan:
+                first, first_failure = discover_mineru(project_root=project, env={}, cache_ttl_seconds=10, clock=clock)
+                second, second_failure = discover_mineru(project_root=project, env={}, cache_ttl_seconds=10, clock=clock)
+                self.assertIsNone(first_failure)
+                self.assertIsNone(second_failure)
+                self.assertEqual(first.executable, second.executable)
+                self.assertEqual(scan.call_count, 1)
+
+                clock_value[0] += 11
+                discover_mineru(project_root=project, env={}, cache_ttl_seconds=10, clock=clock)
+                self.assertEqual(scan.call_count, 2)
+
+                clear_discovery_cache()
+                discover_mineru(project_root=project, env={}, cache_ttl_seconds=10, clock=clock)
+                self.assertEqual(scan.call_count, 3)
 
     def test_explicit_scan_reports_multiple_path_and_known_environment_candidates(self) -> None:
         with tempfile.TemporaryDirectory(prefix="guzi-mineru-multiple-") as temp:

@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import argparse
 import base64
+from contextlib import contextmanager
+from functools import wraps
 import email.parser
 import errno
 import hashlib
@@ -50,6 +52,7 @@ except ImportError:  # pragma: no cover - present only on Windows
 
 from ai import auto_highlights, chat as ai_chat, chat_stream as ai_chat_stream, is_metadata_block, list_models as ai_list_models, reference_quick_read, review_tables, services as ai_services, status as ai_status, test_connections as ai_test_connections, translate_text, translate_text_stream, translation_profile_id
 from bibliography import is_fragmented_metadata_text, retrieve_bibliographic_metadata, retrieve_reference_evidence
+from config import AI_TRANSLATION_MODES, DEFAULT_TRANSLATION_MODE
 from library_store import LibraryStore, LibraryValidationError
 from layout_pipeline import MathRenderer
 from parsing_providers import ProviderError, ParsingRequest, create_default_registry
@@ -62,6 +65,7 @@ DATA_ROOT = Path(os.environ.get("MY_SCHOLAR_DATA_DIR", str(PROJECT_ROOT / "data"
 LIBRARY_ROOT = Path(os.environ.get("MY_SCHOLAR_LIBRARY_DIR", str(DATA_ROOT))).expanduser().resolve()
 COMPONENTS_ROOT = Path(os.environ.get("MY_SCHOLAR_COMPONENTS_DIR", str(DATA_ROOT / "components"))).expanduser().resolve()
 JOBS_ROOT = LIBRARY_ROOT / "jobs"
+PERMANENT_DELETE_JOURNAL_NAME = ".permanent-delete-journal.json"
 MAX_UPLOAD_BYTES = int(os.environ.get("MY_SCHOLAR_MAX_UPLOAD_BYTES", str(100 * 1024 * 1024)))
 MAX_NOTE_ASSET_BYTES = 5 * 1024 * 1024
 MAX_CHAT_IMAGE_BYTES = 5 * 1024 * 1024
@@ -97,6 +101,7 @@ METADATA_STATE_LOCK = threading.RLock()
 METADATA_PENDING: set[tuple[str, str, int]] = set()
 METADATA_GENERATIONS: Dict[str, int] = {}
 METADATA_JOB_LOCKS: Dict[str, threading.RLock] = {}
+JOB_MUTATION_LOCKS: Dict[str, threading.RLock] = {}
 ACCOUNT_SERVICE_URL = os.environ.get("MY_SCHOLAR_ACCOUNT_URL", "").strip().rstrip("/")
 ALLOW_INSECURE_LOOPBACK_ACCOUNT = str(
     os.environ.get("MY_SCHOLAR_ALLOW_INSECURE_LOOPBACK_ACCOUNT", "")
@@ -129,6 +134,42 @@ class ReflowConflictError(PipelineError):
 
 class ReflowCancelledError(PipelineError):
     """The active reflow was cancelled before its render was published."""
+
+
+def _job_mutation_lock(job_id: str) -> threading.RLock:
+    canonical_id = str(job_id or "").strip()
+    with METADATA_STATE_LOCK:
+        return JOB_MUTATION_LOCKS.setdefault(canonical_id, threading.RLock())
+
+
+@contextmanager
+def _job_mutation(job_id: str):
+    """Serialize destructive and document-owned artifact writes per job."""
+    lock = _job_mutation_lock(job_id)
+    with lock:
+        yield
+
+
+@contextmanager
+def _job_mutations(job_ids: Any):
+    """Hold a stable set of per-document mutation locks in id order."""
+    canonical_ids = sorted({str(job_id or "").strip() for job_id in job_ids if str(job_id or "").strip()})
+    locks = [_job_mutation_lock(job_id) for job_id in canonical_ids]
+    for lock in locks:
+        lock.acquire()
+    try:
+        yield
+    finally:
+        for lock in reversed(locks):
+            lock.release()
+
+
+def _locked_job_method(method: Any) -> Any:
+    @wraps(method)
+    def wrapped(self: Any, job_id: str, *args: Any, **kwargs: Any) -> Any:
+        with _job_mutation(job_id):
+            return method(self, job_id, *args, **kwargs)
+    return wrapped
 
 
 class DataRootLock:
@@ -820,7 +861,7 @@ def _appearance_settings(value: Any, *, base: Optional[Dict[str, str]] = None) -
 AI_PROFILE_LIMITS = {"base_url": 2048, "model": 256, "api_key": 4096}
 
 
-def _normalize_ai_profile(value: Any, current: Any = None) -> Dict[str, str]:
+def _normalize_ai_profile(value: Any, current: Any = None, *, service: str = "chat") -> Dict[str, str]:
     """Validate one user-owned OpenAI-compatible profile.
 
     API keys are write-only from the UI: an empty key keeps the existing one,
@@ -834,6 +875,11 @@ def _normalize_ai_profile(value: Any, current: Any = None) -> Dict[str, str]:
         "model": str(incoming.get("model", existing.get("model", "")) or "").strip(),
         "api_key": str(existing.get("api_key", "") or "").strip(),
     }
+    if service == "translation":
+        candidate_mode = str(incoming.get("mode", existing.get("mode", DEFAULT_TRANSLATION_MODE)) or "").strip().lower()
+        if candidate_mode not in AI_TRANSLATION_MODES:
+            raise PipelineError("翻译协议模式无效。")
+        result["mode"] = candidate_mode
     if "api_key" in incoming and str(incoming.get("api_key") or "").strip():
         result["api_key"] = str(incoming.get("api_key")).strip()
     if _setting_bool(incoming.get("clear_api_key"), False):
@@ -854,7 +900,7 @@ def _normalize_ai_settings(value: Any, current: Any = None) -> Dict[str, Dict[st
     incoming = value if isinstance(value, dict) else {}
     existing = current if isinstance(current, dict) else {}
     return {
-        service: _normalize_ai_profile(incoming.get(service), existing.get(service))
+        service: _normalize_ai_profile(incoming.get(service), existing.get(service), service=service)
         for service in ("translation", "chat")
     }
 
@@ -866,6 +912,7 @@ def _public_ai_settings(value: Any) -> Dict[str, Dict[str, Any]]:
             "base_url": profile["base_url"],
             "model": profile["model"],
             "api_key_configured": bool(profile["api_key"]),
+            **({"mode": profile["mode"]} if service == "translation" else {}),
         }
         for service, profile in profiles.items()
     }
@@ -902,7 +949,22 @@ def _copy_ai_profile(source: str, target: str) -> Dict[str, Any]:
         source_profile = profiles[source_name]
         if not source_profile["base_url"] or not source_profile["model"]:
             raise PipelineError("源 AI 服务至少需要填写 Base URL 和模型。")
-        profiles[target_name] = dict(source_profile)
+        # Copy only the credentials shared by both service contracts. A
+        # translation protocol is meaningful only for the translation target;
+        # preserve that target's existing mode when copying a generic Chat
+        # profile instead of silently switching it to qwen-mt.
+        copied: Dict[str, Any] = {
+            "base_url": source_profile["base_url"],
+            "model": source_profile["model"],
+            "api_key": source_profile["api_key"],
+        }
+        if target_name == "translation":
+            copied["mode"] = (
+                source_profile.get("mode")
+                if source_name == "translation"
+                else profiles[target_name].get("mode", DEFAULT_TRANSLATION_MODE)
+            )
+        profiles[target_name] = _normalize_ai_profile(copied, profiles[target_name], service=target_name)
         current["ai"] = profiles
         _persist_settings(current)
     return _public_settings()
@@ -1485,6 +1547,117 @@ class JobStore:
         self._discard_abandoned_uploads()
         self._load_existing()
 
+    @property
+    def permanent_delete_journal_path(self) -> Path:
+        return self.root / PERMANENT_DELETE_JOURNAL_NAME
+
+    def _read_permanent_delete_journal(self) -> List[Dict[str, Any]]:
+        journal = _read_json_file(self.permanent_delete_journal_path, [])
+        return [item for item in journal if isinstance(item, dict) and str(item.get("job_id") or "").strip()]
+
+    def _write_permanent_delete_journal(self, entries: List[Dict[str, Any]]) -> None:
+        if READONLY_MODE:
+            return
+        target = self.permanent_delete_journal_path
+        temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+        temporary.write_text(json.dumps(entries, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(temporary, target)
+        try:
+            directory_fd = os.open(self.root, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        except OSError:
+            pass
+
+    def _upsert_permanent_delete_journal(self, entry: Dict[str, Any]) -> None:
+        entries = [item for item in self._read_permanent_delete_journal() if str(item.get("job_id")) != str(entry.get("job_id"))]
+        entries.append(dict(entry))
+        self._write_permanent_delete_journal(entries)
+
+    def _remove_permanent_delete_journal(self, job_id: str) -> None:
+        entries = [item for item in self._read_permanent_delete_journal() if str(item.get("job_id")) != str(job_id)]
+        if entries:
+            self._write_permanent_delete_journal(entries)
+        else:
+            try:
+                self.permanent_delete_journal_path.unlink()
+            except FileNotFoundError:
+                pass
+
+    def recover_permanent_delete_journals(self, library: Any) -> None:
+        """Resolve interrupted delete transactions after both stores are loaded."""
+        with self.lock:
+            for entry in self._read_permanent_delete_journal():
+                job_id = self.resolve_id(str(entry.get("job_id") or ""))
+                if not JOB_ID_RE.fullmatch(job_id):
+                    self._remove_permanent_delete_journal(str(entry.get("job_id") or ""))
+                    continue
+                root = self.root.resolve()
+                original = (root / job_id).resolve()
+                staged = Path(str(entry.get("staged_dir") or "")).resolve()
+                if staged.parent != root or not staged.name.startswith(f".deleting-{job_id}-"):
+                    self._remove_permanent_delete_journal(job_id)
+                    continue
+                indexed = str(entry.get("status") or "") == "indexed"
+                try:
+                    indexed = indexed or bool(library.is_permanently_deleted(job_id))
+                except Exception:
+                    pass
+                if indexed:
+                    if staged.exists():
+                        try:
+                            shutil.rmtree(staged)
+                        except OSError:
+                            # Keep the indexed journal for a later retry; do
+                            # not recreate a potentially partial job directory.
+                            continue
+                    self.jobs.pop(job_id, None)
+                    self._remove_permanent_delete_journal(job_id)
+                    continue
+                if staged.exists() and not original.exists():
+                    os.replace(staged, original)
+                    record = dict(entry.get("record") or {})
+                    record["job_id"] = job_id
+                    record["job_dir"] = str(original)
+                    self.jobs[job_id] = record
+                self._remove_permanent_delete_journal(job_id)
+
+    def _mark_permanent_delete_indexed(self, token: Dict[str, Any]) -> None:
+        with self.lock:
+            entry = dict(token)
+            entry["status"] = "indexed"
+            self._upsert_permanent_delete_journal(entry)
+
+    def permanent_delete_preflight(self, job_id: str) -> tuple[Optional[str], Optional[str]]:
+        """Validate a permanent delete without changing either store."""
+        with self.lock:
+            canonical_id = self.resolve_id(job_id)
+            record = self.jobs.get(canonical_id)
+            if record is None:
+                return None, "任务不存在。"
+            status = str(record.get("status") or "")
+            if status in {"queued", "running"}:
+                return canonical_id, "文献仍在导入或转换中，暂不能彻底清除。"
+            if status not in {"completed", "failed"}:
+                return canonical_id, "文献当前仍在处理中，暂不能彻底清除。"
+            reflow = record.get("reflow")
+            if isinstance(reflow, dict) and str(reflow.get("status") or "") in {"queued", "running", "cancelling"}:
+                return canonical_id, "文献正在重新排版，请等待任务结束后再彻底清除。"
+            if str(record.get("metadata_status") or "") == "retrieving":
+                return canonical_id, "文献正在检索元数据，请等待任务结束后再彻底清除。"
+            with METADATA_STATE_LOCK:
+                if any(str(pending[0]) == canonical_id for pending in METADATA_PENDING):
+                    return canonical_id, "文献仍有后台任务运行，暂不能彻底清除。"
+            root = self.root.resolve()
+            job_dir = Path(str(record.get("job_dir") or "")).resolve()
+            if job_dir.parent != root or job_dir.name != canonical_id:
+                return canonical_id, "任务目录不在文献库根目录下，已拒绝彻底清除。"
+            if not job_dir.is_dir():
+                return canonical_id, "任务目录不存在，无法安全彻底清除。"
+            return canonical_id, None
+
     def _discard_abandoned_uploads(self) -> None:
         """Remove unpublished upload fragments left by an interrupted process."""
         if READONLY_MODE:
@@ -2039,6 +2212,129 @@ class JobStore:
             records = [dict(item) for item in self.jobs.values()]
         return sorted(records, key=lambda item: item.get("created_at", ""), reverse=True)
 
+    def stage_permanent_delete(self, job_id: str) -> Dict[str, Any]:
+        """Move a job directory aside while its library index is updated.
+
+        The directory rename and in-memory removal happen under the JobStore
+        lock, so conversion/reflow workers cannot claim or persist the job
+        after this point.  The returned token can be passed to
+        :meth:`rollback_permanent_delete` if the index transaction fails.
+        """
+        with self.lock:
+            canonical_id = self.resolve_id(job_id)
+            record = self.jobs.get(canonical_id)
+            if record is None:
+                raise PipelineError("任务不存在。")
+            status = str(record.get("status") or "")
+            if status in {"queued", "running"}:
+                raise ReflowConflictError("文献仍在导入或转换中，暂不能彻底清除。")
+            if status not in {"completed", "failed"}:
+                raise ReflowConflictError("文献当前仍在处理中，暂不能彻底清除。")
+            reflow = record.get("reflow")
+            if isinstance(reflow, dict) and str(reflow.get("status") or "") in {"queued", "running", "cancelling"}:
+                raise ReflowConflictError("文献正在重新排版，请等待任务结束后再彻底清除。")
+            if str(record.get("metadata_status") or "") == "retrieving":
+                raise ReflowConflictError("文献正在检索元数据，请等待任务结束后再彻底清除。")
+            with METADATA_STATE_LOCK:
+                if any(str(pending[0]) == canonical_id for pending in METADATA_PENDING):
+                    raise ReflowConflictError("文献仍有后台任务运行，暂不能彻底清除。")
+
+            root = self.root.resolve()
+            job_dir = Path(str(record.get("job_dir") or "")).resolve()
+            if job_dir.parent != root or job_dir.name != canonical_id:
+                raise PipelineError("任务目录不在文献库根目录下，已拒绝彻底清除。")
+            if not job_dir.is_dir():
+                raise PipelineError("任务目录不存在，无法安全彻底清除。")
+            staged_dir = root / f".deleting-{canonical_id}-{uuid.uuid4().hex}"
+            token = {
+                "job_id": canonical_id,
+                "record": dict(record),
+                "job_dir": str(job_dir),
+                "staged_dir": str(staged_dir),
+                "status": "prepared",
+            }
+            self._upsert_permanent_delete_journal(token)
+            os.replace(job_dir, staged_dir)
+            token["status"] = "staged"
+            try:
+                self._upsert_permanent_delete_journal(token)
+            except Exception:
+                # The prepared journal is enough for a restart to recover the
+                # staged directory. Restore synchronously when possible so a
+                # transient journal-write failure does not leave a live
+                # in-memory record pointing at a missing directory.
+                restored = False
+                try:
+                    if staged_dir.exists() and not job_dir.exists():
+                        os.replace(staged_dir, job_dir)
+                    restored = job_dir.is_dir()
+                except OSError:
+                    restored = False
+                if not restored:
+                    self.jobs.pop(canonical_id, None)
+                    self.sha_index = {
+                        digest: mapped_id
+                        for digest, mapped_id in self.sha_index.items()
+                        if self.resolve_id(mapped_id) != canonical_id
+                    }
+                try:
+                    self._remove_permanent_delete_journal(canonical_id)
+                except OSError:
+                    # Keep the prepared journal if its cleanup also failed;
+                    # startup recovery will reconcile it with the directory.
+                    pass
+                raise
+            self.jobs.pop(canonical_id, None)
+            self.sha_index = {
+                digest: mapped_id
+                for digest, mapped_id in self.sha_index.items()
+                if self.resolve_id(mapped_id) != canonical_id
+            }
+            return token
+
+    def rollback_permanent_delete(self, token: Dict[str, Any]) -> None:
+        """Put a staged job directory and registry record back in place."""
+        canonical_id = str(token.get("job_id") or "").strip()
+        if not JOB_ID_RE.fullmatch(canonical_id):
+            raise PipelineError("永久删除恢复令牌无效。")
+        with self.lock:
+            if canonical_id in self.jobs:
+                raise PipelineError("永久删除恢复与现有任务冲突。")
+            root = self.root.resolve()
+            original = (root / canonical_id).resolve()
+            staged = Path(str(token.get("staged_dir") or "")).resolve()
+            if staged.parent != root or not staged.name.startswith(f".deleting-{canonical_id}-"):
+                raise PipelineError("永久删除暂存目录无效。")
+            if staged.exists():
+                if original.exists():
+                    raise PipelineError("永久删除恢复目标已存在。")
+                os.replace(staged, original)
+            record = dict(token.get("record") or {})
+            record["job_id"] = canonical_id
+            record["job_dir"] = str(original)
+            self.jobs[canonical_id] = record
+            digest = str(record.get("source_sha256") or "").strip().lower()
+            if digest:
+                self.sha_index.setdefault(digest, canonical_id)
+            self._remove_permanent_delete_journal(canonical_id)
+
+    def finalize_permanent_delete(self, token: Dict[str, Any]) -> None:
+        """Delete a staged job directory after both stores are committed."""
+        canonical_id = str(token.get("job_id") or "").strip()
+        if not JOB_ID_RE.fullmatch(canonical_id):
+            raise PipelineError("永久删除令牌无效。")
+        # The journal is a shared read-modify-write file.  Finalization can
+        # run concurrently for different documents, so protect both the
+        # staged-directory cleanup and journal removal with the store lock.
+        with self.lock:
+            root = self.root.resolve()
+            staged = Path(str(token.get("staged_dir") or "")).resolve()
+            if staged.parent != root or not staged.name.startswith(f".deleting-{canonical_id}-"):
+                raise PipelineError("永久删除暂存目录无效。")
+            if staged.exists():
+                shutil.rmtree(staged)
+            self._remove_permanent_delete_journal(canonical_id)
+
     def path(self, job_id: str, relative: str = "") -> Optional[Path]:
         canonical_id = self.resolve_id(job_id)
         if not JOB_ID_RE.fullmatch(canonical_id):
@@ -2066,6 +2362,7 @@ def _initialize_runtime_stores() -> None:
         return
     STORE = JobStore(JOBS_ROOT)
     LIBRARY = LibraryStore(LIBRARY_ROOT)
+    STORE.recover_permanent_delete_journals(LIBRARY)
     LIBRARY.sync_jobs(STORE.list())
     for record in STORE.list():
         _apply_requested_folders(record)
@@ -2172,24 +2469,33 @@ def _quiesce_library_requests(timeout: float = 30.0) -> Dict[str, Any]:
 def _apply_requested_folders(record: Dict[str, Any]) -> List[str]:
     """Replay the durable folder intent after upload or process recovery."""
     job_id = str(record.get("job_id") or "")
-    requested = list(dict.fromkeys(str(value).strip() for value in record.get("requested_folder_ids") or [] if str(value).strip()))
-    if not job_id or not requested:
+    if not job_id:
         return []
-    remaining: List[str] = []
-    warnings: List[str] = []
-    for folder_id in requested:
-        try:
-            LIBRARY.add_to_folder(job_id, folder_id)
-        except LibraryValidationError as exc:
-            # A deleted folder is not recoverable; the document itself remains
-            # valid and is imported into the library root.
-            warnings.append(str(exc))
-        except OSError as exc:
-            remaining.append(folder_id)
-            warnings.append(f"文件夹关联稍后重试：{exc}")
-    if remaining != requested:
-        STORE.update(job_id, requested_folder_ids=remaining)
-    return warnings
+    # Folder replay can run during startup while a stale queue entry is still
+    # draining. Re-read the live job under the same lock as permanent delete so
+    # a deleted document is never recreated or written back from an old record.
+    with _job_mutation(job_id):
+        current = STORE.get(job_id) if STORE is not None else None
+        if not current:
+            return []
+        requested = list(dict.fromkeys(str(value).strip() for value in current.get("requested_folder_ids") or [] if str(value).strip()))
+        if not requested:
+            return []
+        remaining: List[str] = []
+        warnings: List[str] = []
+        for folder_id in requested:
+            try:
+                LIBRARY.add_to_folder(job_id, folder_id)
+            except LibraryValidationError as exc:
+                # A deleted folder is not recoverable; the document itself remains
+                # valid and is imported into the library root.
+                warnings.append(str(exc))
+            except OSError as exc:
+                remaining.append(folder_id)
+                warnings.append(f"文件夹关联稍后重试：{exc}")
+        if remaining != requested and STORE.get(job_id):
+            STORE.update(job_id, requested_folder_ids=remaining)
+        return warnings
 
 
 def _metadata_settings() -> Dict[str, Any]:
@@ -2242,8 +2548,16 @@ def _run_metadata_job(job_id: str, online: bool, phase: str, generation: int) ->
             if generation != METADATA_GENERATIONS.get(job_id, 0):
                 return
         try:
-            LIBRARY.mark_metadata_retrieving(job_id)
-            STORE.update(job_id, metadata_status="retrieving", metadata_phase=phase)
+            # Claim the document-owned state transition under the same lock as
+            # delete and user edits, but leave network/parse work unlocked so a
+            # cancellation or shutdown is not held behind a slow provider.
+            with _job_mutation(job_id):
+                current = STORE.get(job_id)
+                if not current or (phase == "refine" and current.get("status") != "completed"):
+                    return
+                record = current
+                LIBRARY.mark_metadata_retrieving(job_id)
+                STORE.update(job_id, metadata_status="retrieving", metadata_phase=phase)
             started = time.perf_counter()
             job_dir = Path(record["job_dir"])
             source = job_dir / "source.pdf"
@@ -2260,21 +2574,27 @@ def _run_metadata_job(job_id: str, online: bool, phase: str, generation: int) ->
             with METADATA_STATE_LOCK:
                 if generation != METADATA_GENERATIONS.get(job_id, 0):
                     return
-            merged = LIBRARY.merge_metadata_result(job_id, result)
-            STORE.update(
-                job_id,
-                metadata_status=str(merged.get("status") or result.get("status") or "local"),
-                metadata_phase=phase,
-                metadata_seconds=round(time.perf_counter() - started, 3),
-                metadata_venue=str(merged.get("fields", {}).get("venue") or ""),
-            )
+            with _job_mutation(job_id):
+                if not STORE.get(job_id):
+                    return
+                merged = LIBRARY.merge_metadata_result(job_id, result)
+                STORE.update(
+                    job_id,
+                    metadata_status=str(merged.get("status") or result.get("status") or "local"),
+                    metadata_phase=phase,
+                    metadata_seconds=round(time.perf_counter() - started, 3),
+                    metadata_venue=str(merged.get("fields", {}).get("venue") or ""),
+                )
         except Exception as exc:  # metadata must never make a readable job fail
             try:
                 with METADATA_STATE_LOCK:
                     if generation != METADATA_GENERATIONS.get(job_id, 0):
                         return
-                LIBRARY.merge_metadata_result(job_id, {"status": "failed", "error": str(exc)[:500], "fields": {}, "sources": {}, "candidates": []})
-                STORE.update(job_id, metadata_status="failed", metadata_phase=phase)
+                with _job_mutation(job_id):
+                    if not STORE.get(job_id):
+                        return
+                    LIBRARY.merge_metadata_result(job_id, {"status": "failed", "error": str(exc)[:500], "fields": {}, "sources": {}, "candidates": []})
+                    STORE.update(job_id, metadata_status="failed", metadata_phase=phase)
             except Exception:
                 pass
 
@@ -2387,32 +2707,44 @@ def _run_conversion_job(job_id: str, source_name: str) -> None:
         _sync_content_file(attempt_dir, "annotations/annotations.json", [])
         _sync_content_file(attempt_dir, "notes/notes.md", "")
         _write_translation_records(attempt_dir, [])
-        _publish_conversion_attempt(job_dir, attempt_dir)
-        finished = time.perf_counter()
-        stage_timings.append({"stage": last_stage, "seconds": round(finished - last_stage_at, 3)})
-        metrics = {"conversion_seconds": round(finished - started, 3), "stages": stage_timings}
-        STORE.update(job_id, status="completed", stage="已完成", progress=1.0, manifest=manifest, metrics=metrics)
-        completed = STORE.get(job_id)
-        if completed:
-            LIBRARY.sync_jobs([completed])
-            settings = _metadata_settings()
-            if _setting_bool(settings.get("auto_retrieve", True), True):
-                _enqueue_metadata(job_id, _setting_bool(settings.get("online_lookup", True), True), "refine")
+        # Artifact publication and the completed-state/index handoff must be
+        # atomic with respect to permanent deletion. The expensive conversion
+        # itself remains outside this lock.
+        with _job_mutation(job_id):
+            if not STORE.get(job_id):
+                return
+            _publish_conversion_attempt(job_dir, attempt_dir)
+            finished = time.perf_counter()
+            stage_timings.append({"stage": last_stage, "seconds": round(finished - last_stage_at, 3)})
+            metrics = {"conversion_seconds": round(finished - started, 3), "stages": stage_timings}
+            STORE.update(job_id, status="completed", stage="已完成", progress=1.0, manifest=manifest, metrics=metrics)
+            completed = STORE.get(job_id)
+            if completed:
+                LIBRARY.sync_jobs([completed])
+                settings = _metadata_settings()
+                if _setting_bool(settings.get("auto_retrieve", True), True):
+                    _enqueue_metadata(job_id, _setting_bool(settings.get("online_lookup", True), True), "refine")
     except Exception as exc:  # conversion errors must be visible in the UI
         error = str(exc)
         try:
-            (job_dir / "error.json").write_text(json.dumps({"error": error, "at": utc_now()}, ensure_ascii=False, indent=2), encoding="utf-8")
+            with _job_mutation(job_id):
+                if not STORE.get(job_id):
+                    return
+                (job_dir / "error.json").write_text(json.dumps({"error": error, "at": utc_now()}, ensure_ascii=False, indent=2), encoding="utf-8")
         except OSError:
             pass
         try:
-            STORE.update(
-                job_id,
-                status="failed",
-                stage="转换失败",
-                progress=1.0,
-                error=error,
-                metrics={"conversion_seconds": round(time.perf_counter() - started, 3), "stages": stage_timings},
-            )
+            with _job_mutation(job_id):
+                if not STORE.get(job_id):
+                    return
+                STORE.update(
+                    job_id,
+                    status="failed",
+                    stage="转换失败",
+                    progress=1.0,
+                    error=error,
+                    metrics={"conversion_seconds": round(time.perf_counter() - started, 3), "stages": stage_timings},
+                )
         except Exception as persist_error:
             print(f"[conversion] 无法保存任务 {job_id} 的失败状态：{persist_error}", flush=True)
 
@@ -2509,7 +2841,10 @@ def _run_provider_import(provider_id: str, source: Path) -> None:
 
 def _run_reflow_job(job_id: str, source_name: str, generation: int) -> None:
     cancel_event = _reflow_cancel_event(job_id, generation)
-    record = STORE.claim_reflow(job_id, generation)
+    # Claim under the document mutation lock so a queued worker cannot race a
+    # permanent delete or a user-initiated reflow cancellation.
+    with _job_mutation(job_id):
+        record = STORE.claim_reflow(job_id, generation)
     if not record:
         _forget_reflow_cancel_event(job_id, generation)
         return
@@ -2566,20 +2901,30 @@ def _run_reflow_job(job_id: str, source_name: str, generation: int) -> None:
             raise ReflowCancelledError("用户已取消重新排版。")
         if final_dir.exists():
             raise PipelineError("重新排版 generation 已存在，未覆盖任何文件。")
-        os.replace(attempt_dir, final_dir)
-        if cancel_event.is_set():
-            shutil.rmtree(final_dir, ignore_errors=True)
-            raise ReflowCancelledError("用户已取消重新排版。")
-        published_manifest = _validate_reflow_render(final_dir)
-        metrics = {
-            **provider_result.metrics,
-            "generation": generation,
-            "conversion_seconds": round(time.perf_counter() - started, 3),
-            "validation": str(published_manifest.get("validation", {}).get("status") or ""),
-        }
-        if not STORE.complete_reflow(job_id, generation, published_manifest, metrics):
-            shutil.rmtree(final_dir, ignore_errors=True)
-            raise PipelineError("重新排版任务状态已变化，新版本未启用。")
+        # Publishing and switching the active generation are one short,
+        # document-owned critical section. The provider work above remains
+        # cancellable and does not hold this lock.
+        with _job_mutation(job_id):
+            current = STORE.get(job_id)
+            current_reflow = current.get("reflow") if isinstance(current, dict) else None
+            if not current or not isinstance(current_reflow, dict) or int(current_reflow.get("generation") or 0) != int(generation):
+                raise PipelineError("重新排版任务状态已变化，新版本未启用。")
+            if cancel_event.is_set() or current_reflow.get("status") == "cancelling":
+                raise ReflowCancelledError("用户已取消重新排版。")
+            os.replace(attempt_dir, final_dir)
+            if cancel_event.is_set():
+                shutil.rmtree(final_dir, ignore_errors=True)
+                raise ReflowCancelledError("用户已取消重新排版。")
+            published_manifest = _validate_reflow_render(final_dir)
+            metrics = {
+                **provider_result.metrics,
+                "generation": generation,
+                "conversion_seconds": round(time.perf_counter() - started, 3),
+                "validation": str(published_manifest.get("validation", {}).get("status") or ""),
+            }
+            if not STORE.complete_reflow(job_id, generation, published_manifest, metrics):
+                shutil.rmtree(final_dir, ignore_errors=True)
+                raise PipelineError("重新排版任务状态已变化，新版本未启用。")
         try:
             _enqueue_metadata(job_id, False, "refine", force=True)
         except Exception as metadata_error:
@@ -2587,19 +2932,22 @@ def _run_reflow_job(job_id: str, source_name: str, generation: int) -> None:
     except Exception as exc:
         shutil.rmtree(attempt_dir, ignore_errors=True)
         try:
-            current = STORE.get(job_id) or {}
-            if int(current.get("active_render") or 0) != int(generation):
-                shutil.rmtree(final_dir, ignore_errors=True)
-            reflow = current.get("reflow") if isinstance(current.get("reflow"), dict) else {}
-            cancelled = cancel_event.is_set() or isinstance(exc, ReflowCancelledError) or reflow.get("status") == "cancelling"
-            STORE.update_reflow(
-                job_id,
-                generation,
-                expected_statuses={"running", "cancelling"},
-                status="cancelled" if cancelled else "failed",
-                stage="重新排版已取消" if cancelled else "重新排版失败",
-                error="用户已取消重新排版，当前阅读版本未受影响。" if cancelled else str(exc)[:500],
-            )
+            with _job_mutation(job_id):
+                current = STORE.get(job_id) or {}
+                if not current:
+                    return
+                if int(current.get("active_render") or 0) != int(generation):
+                    shutil.rmtree(final_dir, ignore_errors=True)
+                reflow = current.get("reflow") if isinstance(current.get("reflow"), dict) else {}
+                cancelled = cancel_event.is_set() or isinstance(exc, ReflowCancelledError) or reflow.get("status") == "cancelling"
+                STORE.update_reflow(
+                    job_id,
+                    generation,
+                    expected_statuses={"running", "cancelling"},
+                    status="cancelled" if cancelled else "failed",
+                    stage="重新排版已取消" if cancelled else "重新排版失败",
+                    error="用户已取消重新排版，当前阅读版本未受影响。" if cancelled else str(exc)[:500],
+                )
         except Exception as persist_error:
             print(f"[reflow] 无法保存任务 {job_id} 的失败状态：{persist_error}", flush=True)
     finally:
@@ -2802,7 +3150,7 @@ class ScholarHandler(BaseHTTPRequestHandler):
             self._send_json({
                 "ok": True,
                 "service": "my-scholar",
-                "version": "0.1.2",
+                "version": "0.1.4",
                 "readonly": READONLY_MODE,
                 "shell": os.environ.get("MY_SCHOLAR_SHELL", "reference"),
                 "ai": ai,
@@ -3041,6 +3389,9 @@ class ScholarHandler(BaseHTTPRequestHandler):
         if path == "/api/library/display":
             self._update_library_display()
             return
+        if path == "/api/library/items/permanent":
+            self._permanently_delete_library_items()
+            return
         if path == "/api/settings":
             self._update_settings()
             return
@@ -3118,7 +3469,7 @@ class ScholarHandler(BaseHTTPRequestHandler):
                 raise PipelineError("未知 AI 服务。")
             current = _stored_settings().get("ai", {})
             current_profile = current.get(service) if isinstance(current, dict) else None
-            profile = _normalize_ai_profile(payload.get("profile"), current_profile)
+            profile = _normalize_ai_profile(payload.get("profile"), current_profile, service=service)
             if not profile["base_url"]:
                 raise PipelineError("请先填写 Base URL。")
             models = ai_list_models(profile["base_url"], profile["api_key"])
@@ -3173,55 +3524,185 @@ class ScholarHandler(BaseHTTPRequestHandler):
             self._send_error_json(str(exc))
 
     def _update_library_item(self, job_id: str) -> None:
-        if not STORE.get(job_id):
-            self._send_error_json("任务不存在。", HTTPStatus.NOT_FOUND)
-            return
-        try:
-            item = LIBRARY.update_item(job_id, self._read_json_body(max_bytes=512 * 1024))
-            self._send_json({"item": item, **self._library_payload()})
-        except (LibraryValidationError, PipelineError, OSError, ValueError) as exc:
-            self._send_error_json(str(exc))
+        with _job_mutation(job_id):
+            if not STORE.get(job_id):
+                self._send_error_json("任务不存在。", HTTPStatus.NOT_FOUND)
+                return
+            try:
+                item = LIBRARY.update_item(job_id, self._read_json_body(max_bytes=512 * 1024))
+                self._send_json({"item": item, **self._library_payload()})
+            except (LibraryValidationError, PipelineError, OSError, ValueError) as exc:
+                self._send_error_json(str(exc))
 
     def _update_library_metadata(self, job_id: str) -> None:
-        if not STORE.get(job_id):
-            self._send_error_json("任务不存在。", HTTPStatus.NOT_FOUND)
-            return
-        try:
-            metadata = LIBRARY.update_metadata(job_id, self._read_json_body(max_bytes=512 * 1024))
-            self._send_json({"metadata": metadata, **self._library_payload()})
-        except (LibraryValidationError, PipelineError, OSError, ValueError) as exc:
-            self._send_error_json(str(exc))
+        with _job_mutation(job_id):
+            if not STORE.get(job_id):
+                self._send_error_json("任务不存在。", HTTPStatus.NOT_FOUND)
+                return
+            try:
+                metadata = LIBRARY.update_metadata(job_id, self._read_json_body(max_bytes=512 * 1024))
+                self._send_json({"metadata": metadata, **self._library_payload()})
+            except (LibraryValidationError, PipelineError, OSError, ValueError) as exc:
+                self._send_error_json(str(exc))
 
     def _retrieve_library_metadata(self, job_id: str) -> None:
-        record = STORE.get(job_id)
-        if not record:
-            self._send_error_json("任务不存在。", HTTPStatus.NOT_FOUND)
-            return
-        if record.get("status") != "completed":
-            self._send_error_json("任务尚未完成，暂不能检索元数据。", HTTPStatus.CONFLICT)
-            return
-        try:
-            payload = self._read_json_body(max_bytes=64 * 1024) if int(self.headers.get("Content-Length", "0") or "0") else {}
-            # JSON clients may send a literal boolean, while older integrations
-            # occasionally serialize it as a string.  Normalize both forms so
-            # an explicit "false" never accidentally enables network lookup.
-            default_online = _setting_bool(_metadata_settings().get("online_lookup", True), True)
-            online = _setting_bool(payload["online"], default_online) if "online" in payload else default_online
-            metadata = LIBRARY.mark_metadata_retrieving(job_id)
-            queued = _enqueue_metadata(job_id, online, "refine", force=True)
-            self._send_json({"metadata": metadata, "queued": queued}, HTTPStatus.ACCEPTED)
-        except (LibraryValidationError, PipelineError, OSError, ValueError) as exc:
-            self._send_error_json(str(exc))
+        with _job_mutation(job_id):
+            record = STORE.get(job_id)
+            if not record:
+                self._send_error_json("任务不存在。", HTTPStatus.NOT_FOUND)
+                return
+            if record.get("status") != "completed":
+                self._send_error_json("任务尚未完成，暂不能检索元数据。", HTTPStatus.CONFLICT)
+                return
+            try:
+                payload = self._read_json_body(max_bytes=64 * 1024) if int(self.headers.get("Content-Length", "0") or "0") else {}
+                # JSON clients may send a literal boolean, while older integrations
+                # occasionally serialize it as a string.  Normalize both forms so
+                # an explicit "false" never accidentally enables network lookup.
+                default_online = _setting_bool(_metadata_settings().get("online_lookup", True), True)
+                online = _setting_bool(payload["online"], default_online) if "online" in payload else default_online
+                metadata = LIBRARY.mark_metadata_retrieving(job_id)
+                queued = _enqueue_metadata(job_id, online, "refine", force=True)
+                self._send_json({"metadata": metadata, "queued": queued}, HTTPStatus.ACCEPTED)
+            except (LibraryValidationError, PipelineError, OSError, ValueError) as exc:
+                self._send_error_json(str(exc))
 
     def _library_item_action(self, job_id: str, action: str) -> None:
+        with _job_mutation(job_id):
+            if not STORE.get(job_id):
+                self._send_error_json("任务不存在。", HTTPStatus.NOT_FOUND)
+                return
+            try:
+                item = LIBRARY.trash_item(job_id) if action == "trash" else LIBRARY.restore_item(job_id)
+                self._send_json({"item": item, **self._library_payload()})
+            except (LibraryValidationError, OSError, ValueError) as exc:
+                self._send_error_json(str(exc))
+
+    def _permanent_delete_library_item_transaction(self, job_id: str) -> str:
+        """Run one permanent-delete transaction and return its canonical id."""
+        with _job_mutation(job_id):
+            token: Optional[Dict[str, Any]] = None
+            removed: Optional[Dict[str, Any]] = None
+            indexed = False
+            try:
+                token = STORE.stage_permanent_delete(job_id)
+                canonical_id = str(token["job_id"])
+                removed = LIBRARY.permanently_delete_item(canonical_id)
+                STORE._mark_permanent_delete_indexed(token)
+                indexed = True
+                STORE.finalize_permanent_delete(token)
+                return canonical_id
+            except Exception as exc:
+                if indexed:
+                    # The metadata tombstone and journal are durable. Keep the
+                    # staged directory as a retryable tombstone if cleanup
+                    # failed; restoring it as a normal job could be partial.
+                    raise PipelineError(f"文献已从索引移除，但文件清理尚未完成：{exc}") from exc
+                recovery_errors: List[str] = []
+                if removed is not None and token is not None:
+                    try:
+                        LIBRARY.restore_deleted_item(str(token["job_id"]), removed)
+                    except Exception as restore_error:
+                        recovery_errors.append(f"索引恢复失败：{restore_error}")
+                if token is not None:
+                    try:
+                        STORE.rollback_permanent_delete(token)
+                    except Exception as rollback_error:
+                        recovery_errors.append(f"任务目录恢复失败：{rollback_error}")
+                message = str(exc) or "永久删除失败。"
+                if recovery_errors:
+                    message = f"{message}；{'；'.join(recovery_errors)}"
+                raise type(exc)(message) from exc
+
+    def _permanently_delete_library_item(self, job_id: str) -> None:
+        """Delete a trashed document's artifacts and library index with recovery."""
+        if READONLY_MODE:
+            self._send_error_json("只读演示模式，暂不支持修改。", HTTPStatus.FORBIDDEN)
+            return
         if not STORE.get(job_id):
             self._send_error_json("任务不存在。", HTTPStatus.NOT_FOUND)
             return
         try:
-            item = LIBRARY.trash_item(job_id) if action == "trash" else LIBRARY.restore_item(job_id)
-            self._send_json({"item": item, **self._library_payload()})
-        except (LibraryValidationError, OSError, ValueError) as exc:
+            canonical_id = self._permanent_delete_library_item_transaction(job_id)
+            try:
+                response = {"deleted": canonical_id, **self._library_payload()}
+            except Exception:
+                response = {"deleted": canonical_id}
+            self._send_json(response)
+        except Exception as exc:
+            status = HTTPStatus.CONFLICT if isinstance(exc, (PipelineError, LibraryValidationError)) else HTTPStatus.INTERNAL_SERVER_ERROR
+            self._send_error_json(str(exc) or "永久删除失败。", status)
+
+    @staticmethod
+    def _batch_delete_failure(job_id: str, message: str) -> Dict[str, str]:
+        return {"job_id": str(job_id), "error": str(message) or "永久删除失败。"}
+
+    def _permanently_delete_library_items(self) -> None:
+        """Validate and permanently delete several trashed documents atomically per item."""
+        if READONLY_MODE:
+            self._send_error_json("只读演示模式，暂不支持修改。", HTTPStatus.FORBIDDEN)
+            return
+        try:
+            payload = self._read_json_body(max_bytes=256 * 1024)
+            raw_ids = payload.get("job_ids", payload.get("ids"))
+            if not isinstance(raw_ids, list) or not raw_ids:
+                raise PipelineError("请提供非空的 job_ids 列表。")
+            if len(raw_ids) > 500:
+                raise PipelineError("一次最多彻底清除 500 篇文献。")
+        except (PipelineError, ValueError) as exc:
             self._send_error_json(str(exc))
+            return
+
+        requested: List[str] = []
+        failures: List[Dict[str, str]] = []
+        seen: set[str] = set()
+        for raw_id in raw_ids:
+            job_id = str(raw_id or "").strip()
+            if not JOB_ID_RE.fullmatch(job_id):
+                failures.append(self._batch_delete_failure(job_id, "文献 ID 无效。"))
+                continue
+            canonical_id = STORE.resolve_id(job_id)
+            if canonical_id in seen:
+                continue
+            seen.add(canonical_id)
+            requested.append(canonical_id)
+
+        deleted: List[str] = []
+        with _job_mutations(requested):
+            # Do not start any transaction until every item has passed the
+            # recycle-bin and busy-state checks.
+            valid: List[str] = []
+            for job_id in requested:
+                canonical_id, store_error = STORE.permanent_delete_preflight(job_id)
+                if store_error or not canonical_id:
+                    failures.append(self._batch_delete_failure(job_id, store_error or "任务不存在。"))
+                    continue
+                with LIBRARY.lock:
+                    item = LIBRARY.state.get("items", {}).get(canonical_id)
+                if not isinstance(item, dict):
+                    failures.append(self._batch_delete_failure(job_id, "文献不存在。"))
+                    continue
+                if not item.get("deleted_at"):
+                    failures.append(self._batch_delete_failure(job_id, "只能彻底清除回收站中的文献。"))
+                    continue
+                valid.append(canonical_id)
+
+            if failures:
+                response = {"deleted": [], "failed": failures}
+                self._send_json(response, HTTPStatus.CONFLICT)
+                return
+
+            for job_id in valid:
+                try:
+                    deleted.append(self._permanent_delete_library_item_transaction(job_id))
+                except Exception as exc:
+                    failures.append(self._batch_delete_failure(job_id, str(exc)))
+            response = {"deleted": deleted, "failed": failures}
+            try:
+                response.update(self._library_payload())
+            except Exception:
+                pass
+            self._send_json(response, HTTPStatus.MULTI_STATUS if failures else HTTPStatus.OK)
 
     def _create_library_view(self) -> None:
         try:
@@ -3309,6 +3790,10 @@ class ScholarHandler(BaseHTTPRequestHandler):
         if path == "/api/parsing/providers/local-mineru/component":
             self._remove_provider_component("local-mineru")
             return
+        match = re.fullmatch(r"/api/library/items/([a-f0-9]{12,40})/permanent", path)
+        if match:
+            self._permanently_delete_library_item(match.group(1))
+            return
         match = re.fullmatch(r"/api/library/folders/([^/]+)", path)
         if match:
             self._delete_library_folder(match.group(1))
@@ -3351,19 +3836,20 @@ class ScholarHandler(BaseHTTPRequestHandler):
         if READONLY_MODE:
             self._send_error_json("只读演示模式，暂不支持修改。", HTTPStatus.FORBIDDEN)
             return
-        job_dir = STORE.path(job_id)
-        if not job_dir:
-            self._send_error_json("任务不存在。", HTTPStatus.NOT_FOUND)
-            return
         try:
             payload = self._read_json_body(max_bytes=256 * 1024)
             if set(payload) != {"items"}:
                 raise PipelineError("媒体布局请求只能包含 items。")
             patch_items = _normalize_media_layout_items(payload.get("items"))
-            with MEDIA_LAYOUT_LOCK:
-                merged = _read_media_layout(job_dir)["items"]
-                merged.update(patch_items)
-                layout = _write_media_layout(job_dir, merged)
+            with _job_mutation(job_id):
+                job_dir = STORE.path(job_id)
+                if not job_dir:
+                    self._send_error_json("任务不存在。", HTTPStatus.NOT_FOUND)
+                    return
+                with MEDIA_LAYOUT_LOCK:
+                    merged = _read_media_layout(job_dir)["items"]
+                    merged.update(patch_items)
+                    layout = _write_media_layout(job_dir, merged)
             self._send_json({"media_layout": layout})
         except (OSError, PipelineError, ValueError) as exc:
             self._send_error_json(str(exc))
@@ -3385,6 +3871,7 @@ class ScholarHandler(BaseHTTPRequestHandler):
             return None
         return Path(record["job_dir"])
 
+    @_locked_job_method
     def _add_note_asset(self, job_id: str) -> None:
         job_dir = self._completed_job_dir(job_id)
         if not job_dir:
@@ -3415,6 +3902,7 @@ class ScholarHandler(BaseHTTPRequestHandler):
         except (KeyError, OSError, PipelineError, TypeError, ValueError) as exc:
             self._send_error_json(str(exc))
 
+    @_locked_job_method
     def _add_annotation(self, job_id: str) -> None:
         job_dir = self._completed_job_dir(job_id)
         if not job_dir:
@@ -3493,6 +3981,7 @@ class ScholarHandler(BaseHTTPRequestHandler):
         except (PipelineError, OSError) as exc:
             self._send_error_json(str(exc))
 
+    @_locked_job_method
     def _delete_annotation(self, job_id: str, annotation_id: str) -> None:
         job_dir = self._completed_job_dir(job_id)
         if not job_dir:
@@ -3504,6 +3993,7 @@ class ScholarHandler(BaseHTTPRequestHandler):
             _sync_content_file(job_dir, "annotations/annotations.json", annotations)
         self._send_json({"annotations": annotations})
 
+    @_locked_job_method
     def _delete_manual_annotations(self, job_id: str) -> None:
         job_dir = self._completed_job_dir(job_id)
         if not job_dir:
@@ -3518,6 +4008,7 @@ class ScholarHandler(BaseHTTPRequestHandler):
             _sync_content_file(job_dir, "annotations/annotations.json", kept)
         self._send_json({"annotations": kept, "deleted": deleted})
 
+    @_locked_job_method
     def _update_annotation(self, job_id: str, annotation_id: str) -> None:
         job_dir = self._completed_job_dir(job_id)
         if not job_dir:
@@ -3580,6 +4071,7 @@ class ScholarHandler(BaseHTTPRequestHandler):
         except (PipelineError, OSError) as exc:
             self._send_error_json(str(exc))
 
+    @_locked_job_method
     def _update_notes(self, job_id: str) -> None:
         job_dir = self._completed_job_dir(job_id)
         if not job_dir:
@@ -3596,39 +4088,44 @@ class ScholarHandler(BaseHTTPRequestHandler):
             self._send_error_json(str(exc))
 
     def _translate(self, job_id: str) -> None:
-        job_dir = self._completed_job_dir(job_id)
-        if not job_dir:
-            return
         try:
-            document = _read_json_file(_active_conversion_root(job_dir) / "document.json", {})
-            semantic_validation = document.get("semantic_validation", {}) if isinstance(document, dict) else {}
-            if (
-                isinstance(document, dict) and document.get("translation_enabled") is False
-            ) or (
-                isinstance(semantic_validation, dict) and semantic_validation.get("status") == "FAIL"
-            ):
-                raise PipelineError("当前文档未通过语义结构校验，不能对视觉整页结果执行段落翻译。")
-            payload = self._read_json_body()
-            text = str(payload.get("text", "")).strip()
-            block_id = str(payload.get("block_id", "") or "").strip()
-            target_language = str(payload.get("target_language", "中文") or "中文").strip()
-            source_hash = str(payload.get("source_hash", "") or "").strip()
-            formulas = payload.get("formulas", [])
-            if not isinstance(formulas, list):
-                formulas = []
-            formulas = [
-                {"token": str(item.get("token", "")), "tex": str(item.get("tex", ""))[:4000]}
-                for item in formulas
-                if isinstance(item, dict) and re.fullmatch(r"__MY_SCHOLAR_MATH_\d+__", str(item.get("token", "")))
-            ]
-            profile_id = translation_profile_id()
-            cache_key = _translation_key(text, block_id, target_language, source_hash, profile_id)
-            with TRANSLATION_LOCK:
-                cached = next((item for item in _translation_records(job_dir) if item.get("cache_key") == cache_key), None)
+            # Keep only document validation and cache lookup in the mutation
+            # section. The model call itself must be outside it so the three
+            # full-translation workers can run concurrently for one document.
+            with _job_mutation(job_id):
+                job_dir = self._completed_job_dir(job_id)
+                if not job_dir:
+                    return
+                document = _read_json_file(_active_conversion_root(job_dir) / "document.json", {})
+                semantic_validation = document.get("semantic_validation", {}) if isinstance(document, dict) else {}
+                if (
+                    isinstance(document, dict) and document.get("translation_enabled") is False
+                ) or (
+                    isinstance(semantic_validation, dict) and semantic_validation.get("status") == "FAIL"
+                ):
+                    raise PipelineError("当前文档未通过语义结构校验，不能对视觉整页结果执行段落翻译。")
+                payload = self._read_json_body()
+                text = str(payload.get("text", "")).strip()
+                block_id = str(payload.get("block_id", "") or "").strip()
+                target_language = str(payload.get("target_language", "中文") or "中文").strip()
+                source_hash = str(payload.get("source_hash", "") or "").strip()
+                formulas = payload.get("formulas", [])
+                if not isinstance(formulas, list):
+                    formulas = []
+                formulas = [
+                    {"token": str(item.get("token", "")), "tex": str(item.get("tex", ""))[:4000]}
+                    for item in formulas
+                    if isinstance(item, dict) and re.fullmatch(r"__MY_SCHOLAR_MATH_\d+__", str(item.get("token", "")))
+                ]
+                profile_id = translation_profile_id()
+                cache_key = _translation_key(text, block_id, target_language, source_hash, profile_id)
+                with TRANSLATION_LOCK:
+                    cached = next((item for item in _translation_records(job_dir) if item.get("cache_key") == cache_key), None)
             if payload.get("stream"):
                 self._translate_stream_response(
                     job_dir,
                     cached,
+                    job_id=job_id,
                     text=text,
                     block_id=block_id,
                     target_language=target_language,
@@ -3658,10 +4155,17 @@ class ScholarHandler(BaseHTTPRequestHandler):
                 "formulas": formulas,
                 "updated_at": utc_now(),
             }
-            with TRANSLATION_LOCK:
-                records = [item for item in _translation_records(job_dir) if item.get("cache_key") != cache_key]
-                records.append(record)
-                _write_translation_records(job_dir, records)
+            with _job_mutation(job_id):
+                if STORE is not None:
+                    current_dir = STORE.path(job_id)
+                    if not current_dir:
+                        self._send_error_json("任务不存在。", HTTPStatus.NOT_FOUND)
+                        return
+                    job_dir = current_dir
+                with TRANSLATION_LOCK:
+                    records = [item for item in _translation_records(job_dir) if item.get("cache_key") != cache_key]
+                    records.append(record)
+                    _write_translation_records(job_dir, records)
             self._send_json({"result": {**record, "cached": False}})
         except Exception as exc:
             self._send_error_json(f"翻译失败：{exc}", HTTPStatus.BAD_GATEWAY)
@@ -3838,6 +4342,7 @@ class ScholarHandler(BaseHTTPRequestHandler):
         job_dir: Path,
         cached: Optional[Dict[str, Any]],
         *,
+        job_id: str,
         text: str,
         block_id: str,
         target_language: str,
@@ -3892,10 +4397,16 @@ class ScholarHandler(BaseHTTPRequestHandler):
                 "formulas": formulas,
                 "updated_at": utc_now(),
             }
-            with TRANSLATION_LOCK:
-                records = [item for item in _translation_records(job_dir) if item.get("cache_key") != cache_key]
-                records.append(record)
-                _write_translation_records(job_dir, records)
+            with _job_mutation(job_id):
+                if STORE is not None:
+                    current_dir = STORE.path(job_id)
+                    if not current_dir:
+                        raise PipelineError("任务不存在。")
+                    job_dir = current_dir
+                with TRANSLATION_LOCK:
+                    records = [item for item in _translation_records(job_dir) if item.get("cache_key") != cache_key]
+                    records.append(record)
+                    _write_translation_records(job_dir, records)
             self._send_sse_event({"result": {**record, "cached": False}})
         except Exception as exc:
             self._send_sse_event({"error": f"翻译失败：{exc}"})
@@ -3994,6 +4505,7 @@ class ScholarHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             self._send_sse_event({"error": f"AI 对话失败：{exc}"})
 
+    @_locked_job_method
     def _auto_highlights(self, job_id: str) -> None:
         job_dir = self._completed_job_dir(job_id)
         if not job_dir:
@@ -4275,6 +4787,7 @@ class ScholarHandler(BaseHTTPRequestHandler):
         except ProviderError as exc:
             self._send_provider_error(exc)
 
+    @_locked_job_method
     def _start_reflow(self, job_id: str) -> None:
         if READONLY_MODE:
             self._send_error_json("只读演示模式，暂不支持修改。", HTTPStatus.FORBIDDEN)
@@ -4309,6 +4822,7 @@ class ScholarHandler(BaseHTTPRequestHandler):
         current = STORE.get(str(record["job_id"])) or record
         self._send_json(_public_job(current), HTTPStatus.ACCEPTED)
 
+    @_locked_job_method
     def _cancel_reflow(self, job_id: str) -> None:
         if READONLY_MODE:
             self._send_error_json("只读演示模式，暂不支持修改。", HTTPStatus.FORBIDDEN)
@@ -4328,6 +4842,7 @@ class ScholarHandler(BaseHTTPRequestHandler):
         current = STORE.get(str(record["job_id"])) or record
         self._send_json(_public_job(current), HTTPStatus.ACCEPTED)
 
+    @_locked_job_method
     def _run_ai_review(self, job_id: str) -> None:
         record = STORE.get(job_id)
         if not record:
@@ -4338,7 +4853,11 @@ class ScholarHandler(BaseHTTPRequestHandler):
             return
         try:
             result = review_tables(Path(record["job_dir"]))
-            manifest_path = Path(record["job_dir"]) / "manifest.json"
+            current = STORE.get(job_id)
+            if not current:
+                self._send_error_json("任务不存在。", HTTPStatus.NOT_FOUND)
+                return
+            manifest_path = Path(current["job_dir"]) / "manifest.json"
             if manifest_path.is_file():
                 manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
                 manifest["ai"] = {"status": result.get("status"), "model": result.get("model"), "reviewed_at": result.get("reviewed_at")}

@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -70,6 +71,28 @@ class MineruScanResult:
             "truncated": self.truncated,
             "timed_out": self.timed_out,
         }
+
+
+# Status endpoints can be polled repeatedly while the settings view is open.
+# Keep automatic discovery cheap without weakening explicit user scans.
+AUTOMATIC_DISCOVERY_CACHE_TTL_SECONDS = 15.0
+_DISCOVERY_CACHE_LOCK = threading.RLock()
+_DISCOVERY_CACHE: dict[tuple[object, ...], tuple[float, Optional[MineruCandidate], Optional[str]]] = {}
+
+
+def clear_discovery_cache() -> None:
+    """Invalidate process-local automatic discovery results."""
+    with _DISCOVERY_CACHE_LOCK:
+        _DISCOVERY_CACHE.clear()
+
+
+def _automatic_cache_key(project_root: Optional[Path], values: Mapping[str, str], allow_development: bool) -> tuple[object, ...]:
+    root = Path(project_root or values.get("MY_SCHOLAR_PROJECT_ROOT") or Path(__file__).resolve().parent).expanduser().resolve()
+    environment = tuple(
+        (name, str(values.get(name) or ""))
+        for name in ("MY_SCHOLAR_MINERU", "MY_SCHOLAR_PACKAGED", "MY_SCHOLAR_TOOLCHAIN_ROOT", "PATH")
+    )
+    return (_path_key(root), bool(allow_development), environment)
 
 
 def _resolve_interpreter(executable: Path) -> Optional[Path]:
@@ -453,6 +476,8 @@ def discover_mineru(
     explicit_path: Optional[Path | str] = None,
     env: Optional[Mapping[str, str]] = None,
     allow_development: Optional[bool] = None,
+    cache_ttl_seconds: float = AUTOMATIC_DISCOVERY_CACHE_TTL_SECONDS,
+    clock: Callable[[], float] = time.monotonic,
 ) -> tuple[Optional[MineruCandidate], Optional[str]]:
     """Find one healthy candidate in a deterministic, bounded order."""
     values = os.environ if env is None else env
@@ -465,6 +490,19 @@ def discover_mineru(
         allow_development = str(values.get("MY_SCHOLAR_PACKAGED") or "").strip() not in {"1", "true", "yes"}
     if not allow_development:
         return None, "未选择外部版面引擎"
+    ttl = max(0.0, float(cache_ttl_seconds))
+    cache_key = _automatic_cache_key(project_root, values, allow_development)
+    now = clock()
+    if ttl > 0:
+        with _DISCOVERY_CACHE_LOCK:
+            cached = _DISCOVERY_CACHE.get(cache_key)
+            if cached and now - cached[0] < ttl:
+                cached_candidate = cached[1]
+                if cached_candidate is None or (
+                    cached_candidate.executable.is_file() and os.access(cached_candidate.executable, os.X_OK)
+                ):
+                    return cached_candidate, cached[2]
+                _DISCOVERY_CACHE.pop(cache_key, None)
     result = scan_mineru(
         project_root=project_root,
         env=values,
@@ -473,14 +511,21 @@ def discover_mineru(
         timeout_seconds=60.0,
     )
     if result.candidates:
-        return result.candidates[0], None
-    failures = [f"{item['path']}: {item['reason']}" for item in result.diagnostics]
-    return None, "; ".join(failures) if failures else "未发现外部版面引擎"
+        candidate, failure = result.candidates[0], None
+    else:
+        failures = [f"{item['path']}: {item['reason']}" for item in result.diagnostics]
+        candidate, failure = None, "; ".join(failures) if failures else "未发现外部版面引擎"
+    if ttl > 0:
+        with _DISCOVERY_CACHE_LOCK:
+            _DISCOVERY_CACHE[cache_key] = (clock(), candidate, failure)
+    return candidate, failure
 
 
 __all__ = [
     "MineruCandidate",
     "MineruScanResult",
+    "AUTOMATIC_DISCOVERY_CACHE_TTL_SECONDS",
+    "clear_discovery_cache",
     "discover_mineru",
     "discover_mineru_candidates",
     "scan_mineru",

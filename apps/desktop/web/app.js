@@ -573,8 +573,16 @@
   function translationsForActiveProfile(records) {
     const values = Array.isArray(records) ? records : [];
     const profileId = translationProfileId();
-    if (!profileId) return values;
+    // An empty profile must never render a translation produced by a previous
+    // model. Cache records remain on disk for an explicit switch-back, but
+    // they are not eligible while no active profile is configured.
+    if (!profileId) return [];
     return values.filter((record) => String(record?.profile_id || '') === profileId);
+  }
+
+  function clearRenderedTranslations() {
+    const doc = frameDocument();
+    doc?.querySelectorAll('.my-scholar-translation').forEach((node) => node.remove());
   }
 
   function translationCacheFor(jobId = state.activeJob?.job_id) {
@@ -586,7 +594,9 @@
 
   function setTranslationCacheFor(jobId, records) {
     const key = String(jobId || '');
-    const value = translationsForActiveProfile(records);
+    // Keep records for previous profiles so switching back can reuse them;
+    // render/lookups still scope reads to the active profile.
+    const value = Array.isArray(records) ? records : [];
     if (key) state.translationCaches.set(key, value);
     if (!key || key === state.activeJob?.job_id) state.translationCache = value;
     return value;
@@ -1871,8 +1881,11 @@
       const shortcut = (label) => `<kbd>${escapeHTML(label)}</kbd>`;
       const selectedCount = selectedLibraryJobIds().length;
       const bulkLabel = selectedCount > 1 ? `（${selectedCount} 篇）` : '';
+      const selectedIds = selectedLibraryJobIds();
+      const actionIds = selectedIds.includes(entry.jobId) && selectedIds.length > 1 ? selectedIds : [entry.jobId];
+      const permanentAllowed = actionIds.every((id) => Boolean(libraryEntryById(id)?.item?.deleted_at));
       const menu = entry.item?.deleted_at
-        ? `<button data-row-action="metadata" data-job-id="${escapeHTML(entry.jobId)}" role="menuitem" type="button"${selectedCount > 1 ? ' disabled' : ''}><span>编辑元数据</span>${shortcut('⌘I')}</button><div class="row-menu-separator" role="separator"></div><button data-row-action="restore" data-job-id="${escapeHTML(entry.jobId)}" role="menuitem" type="button"><span class="row-action-label">恢复文献${bulkLabel}</span>${shortcut('⌘⌫')}</button>`
+        ? `<button data-row-action="metadata" data-job-id="${escapeHTML(entry.jobId)}" role="menuitem" type="button"${selectedCount > 1 ? ' disabled' : ''}><span>编辑元数据</span>${shortcut('⌘I')}</button><div class="row-menu-separator" role="separator"></div><button data-row-action="restore" data-job-id="${escapeHTML(entry.jobId)}" role="menuitem" type="button"><span class="row-action-label">恢复文献${bulkLabel}</span>${shortcut('⌘⌫')}</button><button class="is-danger" data-row-action="permanent" data-job-id="${escapeHTML(entry.jobId)}" role="menuitem" type="button"${permanentAllowed ? '' : ' disabled'} title="只能彻底清除全部位于回收站的选中文献"><span class="row-action-label">彻底清除${bulkLabel}</span></button>`
         : `<button data-row-action="open" data-job-id="${escapeHTML(entry.jobId)}" role="menuitem" type="button"${job.status === 'completed' ? '' : ' disabled'}><span>打开文献</span>${shortcut('↩')}</button><button data-row-action="metadata" data-job-id="${escapeHTML(entry.jobId)}" role="menuitem" type="button"${selectedCount > 1 ? ' disabled' : ''}><span>编辑元数据</span>${shortcut('⌘I')}</button><button data-row-action="folders" data-job-id="${escapeHTML(entry.jobId)}" role="menuitem" type="button"><span class="row-action-label">添加到文件夹${bulkLabel}…</span>${shortcut('⌘⇧F')}</button><div class="row-menu-separator" role="separator"></div><button class="is-danger" data-row-action="trash" data-job-id="${escapeHTML(entry.jobId)}" role="menuitem" type="button"><span class="row-action-label">移入回收站${bulkLabel}</span>${shortcut('⌘⌫')}</button>`;
       const selected = selectedLibraryJobIds().includes(entry.jobId);
       return `<article class="library-card library-row${entry.item?.deleted_at ? ' is-trashed' : ''}${selected ? ' is-selected' : ''}" style="--library-grid-template:${libraryGridTemplate(columns)}" data-job-id="${escapeHTML(entry.jobId)}" data-status="${escapeHTML(job.status || '')}" tabindex="0" aria-selected="${selected ? 'true' : 'false'}" aria-grabbed="false" aria-label="文献：${escapeHTML(title)}">${columns.map(cell).join('')}<div class="library-row-actions"><button class="row-more-button" data-row-menu-job-id="${escapeHTML(entry.jobId)}" type="button" aria-label="更多操作" aria-haspopup="menu" aria-expanded="false">⋯</button><div class="row-more-menu" data-row-more-menu data-menu-owner="${escapeHTML(entry.jobId)}" role="menu" aria-label="文献操作">${menu}</div></div></article>`;
@@ -1974,6 +1987,7 @@
     const library = libraryState();
     const graphMode = state.libraryMode === 'graph';
     document.body.classList.toggle('library-graph-mode', graphMode);
+    syncLibrarySelection();
     $('#library-list-actions').hidden = graphMode;
     $('#library-graph-actions').hidden = !graphMode;
     $('#library-list-surface').hidden = graphMode;
@@ -2019,6 +2033,7 @@
     if (!entries.length) { clearLibrarySelection(); $('#recent-list').innerHTML = `<div class="empty-state">${state.activeFolderId === 'system-trash' ? '回收站为空。' : '没有匹配的文献。拖入一份 PDF 开始。'}</div>`; return; }
     $('#recent-list').style.setProperty('--library-grid-template', template);
     $('#recent-list').innerHTML = renderLibraryContent(entries);
+    syncLibrarySelection();
     renderLibraryDetails();
   }
   async function loadLibrary() {
@@ -2033,6 +2048,13 @@
   }
   $('#library-search').addEventListener('input', () => { clearLibrarySelection(); renderLibrary(); });
   $('#library-sort')?.addEventListener('change', (event) => { state.librarySort = event.target.value; renderLibrary(); });
+  function syncLibrarySelection() {
+    $$('.library-row').forEach((row) => {
+      const selected = state.selectedLibraryJobIds.has(row.dataset.jobId);
+      row.classList.toggle('is-selected', selected);
+      row.setAttribute('aria-selected', String(selected));
+    });
+  }
   $('#graph-toggle-similarity')?.addEventListener('change', (event) => {
     state.graphConfig.showSimilarity = event.target.checked;
     persistGraphPreferences();
@@ -2077,6 +2099,7 @@
     document.querySelectorAll('[data-row-action="folders"] .row-action-label').forEach((node) => { node.textContent = `添加到文件夹${bulkLabel}…`; });
     document.querySelectorAll('[data-row-action="trash"] .row-action-label').forEach((node) => { node.textContent = `移入回收站${bulkLabel}`; });
     document.querySelectorAll('[data-row-action="restore"] .row-action-label').forEach((node) => { node.textContent = `恢复文献${bulkLabel}`; });
+    document.querySelectorAll('[data-row-action="permanent"] .row-action-label').forEach((node) => { node.textContent = `彻底清除${bulkLabel}`; });
   }
   function pruneLibrarySelection(entries) {
     const visibleIds = new Set((entries || []).map((entry) => entry?.jobId).filter(Boolean));
@@ -2087,11 +2110,13 @@
     else if (!state.selectedLibraryJobIds.has(state.selectedLibraryJobId)) state.selectedLibraryJobId = [...state.selectedLibraryJobIds][0];
     refreshRowMenuLabels();
   }
-  function clearLibrarySelection() {
+  function clearLibrarySelection({ renderDetails = true } = {}) {
     state.selectedLibraryJobIds.clear();
     state.selectedLibraryJobId = null;
     refreshRowMenuLabels();
-    renderLibraryDetails();
+    syncLibrarySelection();
+    if (renderDetails) renderLibraryDetails();
+    else setDetailsOpen(false);
   }
   function renderedLibraryRows(root = document) { return [...root.querySelectorAll('.library-row')]; }
   function selectLibraryRow(row, { focus = false, additive = false, range = false } = {}) {
@@ -2114,11 +2139,7 @@
     state.selectedLibraryJobId = state.selectedLibraryJobIds.size
       ? (state.selectedLibraryJobIds.has(jobId) ? jobId : [...state.selectedLibraryJobIds][0])
       : null;
-    $$('.library-row').forEach((candidate) => {
-      const selected = state.selectedLibraryJobIds.has(candidate.dataset.jobId);
-      candidate.classList.toggle('is-selected', selected);
-      candidate.setAttribute('aria-selected', String(selected));
-    });
+    syncLibrarySelection();
     refreshRowMenuLabels();
     renderLibraryDetails();
     if (focus) row.focus({ preventScroll: true });
@@ -2185,7 +2206,11 @@
     if (!entry) return;
     const selectedIds = selectedLibraryJobIds();
     const actionIds = selectedIds.includes(jobId) && selectedIds.length > 1 ? selectedIds : [jobId];
-    if (action === 'folders' || action === 'trash' || action === 'restore') {
+    if (action === 'permanent' && actionIds.some((id) => !libraryEntryById(id)?.item?.deleted_at)) {
+      showToast('只能彻底清除全部位于回收站的选中文献。', true);
+      return;
+    }
+    if (action === 'folders' || action === 'trash' || action === 'restore' || action === 'permanent') {
       if (actionIds.length > 1) { await applyBulkRowAction(actionIds, action); return; }
     }
     if (action === 'open') {
@@ -2195,6 +2220,7 @@
     else if (action === 'metadata') openMetadataDialog(jobId);
     else if (action === 'trash') await trashLibraryItem(jobId);
     else if (action === 'restore') await restoreLibraryItem(jobId);
+    else if (action === 'permanent') await permanentlyDeleteLibraryItem(jobId);
   }
   function previewInlineRating(group, rating = null) {
     if (!group) return;
@@ -2294,7 +2320,9 @@
       return;
     }
     if (ids.length > 1) {
-      renderDetailsPanel(panel, `<div class="library-details-empty">已选中 ${ids.length} 篇文献</div><div class="details-actions"><button class="secondary-button" data-details-action="folders" type="button">添加到文件夹…</button><button class="secondary-button" data-details-action="trash" type="button">移入回收站</button></div>`, `library-multi:${[...ids].sort().join(',')}`);
+      const allTrashed = ids.every((id) => libraryEntryById(id)?.item?.deleted_at);
+      const permanentAction = allTrashed ? `<button class="secondary-button danger-button" data-details-action="permanent" type="button">彻底清除已选文献</button>` : '';
+      renderDetailsPanel(panel, `<div class="library-details-empty">已选中 ${ids.length} 篇文献</div><div class="details-actions"><button class="secondary-button" data-details-action="folders" type="button">添加到文件夹…</button><button class="secondary-button" data-details-action="trash" type="button">移入回收站</button>${permanentAction}</div>`, `library-multi:${[...ids].sort().join(',')}`);
       return;
     }
     const entry = libraryEntryById(ids[0]);
@@ -2364,7 +2392,16 @@
   });
 
   async function handleLibraryListClick(event) {
+    if (event.target.closest?.('#library-graph-surface')) return;
     if (libraryDrag.suppressClickUntil > Date.now()) { event.preventDefault(); event.stopPropagation(); return; }
+    // Pointer capture retargets the click generated after a marquee release to
+    // the list itself. Consume that one click regardless of dispatch latency.
+    if (libraryMarquee.suppressNextClick) {
+      libraryMarquee.suppressNextClick = false;
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
     // Inline editors and status pickers stop propagation so their own
     // handlers can remain isolated. Close any other transient surface here
     // before those early returns, keeping one popup open at a time.
@@ -2380,6 +2417,10 @@
       return;
     }
     const rowSurface = row && !event.target.closest('button, select, input, a, [data-row-more-menu], .reading-status-menu');
+    if (!row && !event.target.closest('button, select, input, a, [data-row-more-menu], .reading-status-menu')) {
+      clearLibrarySelection();
+      return;
+    }
     if (rowSurface) selectLibraryRow(row, { additive: event.metaKey || event.ctrlKey, range: event.shiftKey });
     const open = event.target.closest('[data-open-job-id]');
     if (open) { event.stopPropagation(); await performLibraryRowAction(open.dataset.openJobId, 'open'); return; }
@@ -2440,7 +2481,104 @@
     selectLibraryRow(row);
     await performLibraryRowAction(row.dataset.jobId, 'open');
   }
-  const libraryDrag = { timer: null, row: null, pointerId: null, startX: 0, startY: 0, active: false, targetFolder: null, ghost: null, suppressClickUntil: 0 };
+  const libraryDrag = { timer: null, row: null, pointerId: null, startX: 0, startY: 0, active: false, additive: false, targetFolder: null, ghost: null, suppressClickUntil: 0 };
+  const libraryMarquee = { list: null, pointerId: null, startX: 0, startY: 0, active: false, additive: false, pendingClear: false, originSelected: new Set(), element: null, suppressNextClick: false };
+  function librarySelectionSurface(node) {
+    if (!node) return null;
+    if (node.matches?.('.library-main, .view-editor')) return node;
+    return node.closest?.('.library-main, .view-editor') || null;
+  }
+  function isLibraryGraphSurface(node) {
+    return Boolean(node?.closest?.('#library-graph-surface'));
+  }
+  function clearLibraryMarquee({ preserveSuppression = false } = {}) {
+    const list = libraryMarquee.list;
+    const pointerId = libraryMarquee.pointerId;
+    if (list && pointerId != null && list.hasPointerCapture?.(pointerId)) {
+      try { list.releasePointerCapture(pointerId); } catch (_error) {}
+    }
+    libraryMarquee.element?.remove();
+    document.body.classList.remove('library-marquee-selecting');
+    libraryMarquee.list = null;
+    libraryMarquee.pointerId = null;
+    libraryMarquee.startX = 0;
+    libraryMarquee.startY = 0;
+    libraryMarquee.active = false;
+    libraryMarquee.additive = false;
+    libraryMarquee.pendingClear = false;
+    libraryMarquee.originSelected = new Set();
+    libraryMarquee.element = null;
+    if (!preserveSuppression) libraryMarquee.suppressNextClick = false;
+  }
+  function beginLibraryMarquee(list, event, { startX = event.clientX, startY = event.clientY, additive = event.metaKey || event.ctrlKey } = {}) {
+    if (!list) return;
+    clearLibraryMarquee();
+    libraryMarquee.list = list;
+    libraryMarquee.pointerId = event.pointerId;
+    libraryMarquee.startX = startX;
+    libraryMarquee.startY = startY;
+    libraryMarquee.additive = additive;
+    libraryMarquee.pendingClear = !additive;
+    libraryMarquee.originSelected = new Set(state.selectedLibraryJobIds);
+    try { list.setPointerCapture?.(event.pointerId); } catch (_error) {}
+  }
+  function applyMarqueeSelection(nextIds, { renderDetails = true } = {}) {
+    const previous = state.selectedLibraryJobIds;
+    if (previous.size === nextIds.size && [...previous].every((jobId) => nextIds.has(jobId))) return;
+    previous.clear();
+    nextIds.forEach((jobId) => previous.add(jobId));
+    state.selectedLibraryJobId = previous.size ? [...previous][0] : null;
+    syncLibrarySelection();
+    refreshRowMenuLabels();
+    if (renderDetails) renderLibraryDetails();
+  }
+  function updateLibraryMarquee(event) {
+    if (!libraryMarquee.list || event.pointerId !== libraryMarquee.pointerId) return;
+    const moved = Math.hypot(event.clientX - libraryMarquee.startX, event.clientY - libraryMarquee.startY) > 6;
+    if (!libraryMarquee.active && !moved) return;
+    if (!libraryMarquee.active) {
+      libraryMarquee.active = true;
+      setDetailsOpen(false);
+      if (libraryMarquee.pendingClear) {
+        libraryMarquee.pendingClear = false;
+        clearLibrarySelection({ renderDetails: false });
+      }
+      document.body.classList.add('library-marquee-selecting');
+      libraryMarquee.element = document.createElement('div');
+      libraryMarquee.element.className = 'library-selection-marquee';
+      document.body.append(libraryMarquee.element);
+    }
+    event.preventDefault();
+    const listRect = libraryMarquee.list.getBoundingClientRect();
+    const left = Math.max(listRect.left, Math.min(libraryMarquee.startX, event.clientX));
+    const right = Math.min(listRect.right, Math.max(libraryMarquee.startX, event.clientX));
+    const top = Math.max(listRect.top, Math.min(libraryMarquee.startY, event.clientY));
+    const bottom = Math.min(listRect.bottom, Math.max(libraryMarquee.startY, event.clientY));
+    if (libraryMarquee.element) {
+      libraryMarquee.element.style.left = `${left}px`;
+      libraryMarquee.element.style.top = `${top}px`;
+      libraryMarquee.element.style.width = `${Math.max(1, right - left)}px`;
+      libraryMarquee.element.style.height = `${Math.max(1, bottom - top)}px`;
+    }
+    const nextIds = new Set(libraryMarquee.additive ? libraryMarquee.originSelected : []);
+    renderedLibraryRows(libraryMarquee.list).forEach((row) => {
+      const rect = row.getBoundingClientRect();
+      if (rect.right >= left && rect.left <= right && rect.bottom >= top && rect.top <= bottom) nextIds.add(row.dataset.jobId);
+    });
+    applyMarqueeSelection(nextIds, { renderDetails: false });
+  }
+  function finishLibraryMarquee(event) {
+    if (!libraryMarquee.list || event.pointerId !== libraryMarquee.pointerId) return false;
+    const active = libraryMarquee.active;
+    const cancelled = event.type === 'pointercancel';
+    if (active && !cancelled) {
+      event.preventDefault();
+      libraryMarquee.suppressNextClick = true;
+    }
+    clearLibraryMarquee({ preserveSuppression: active && !cancelled });
+    if (active) renderLibraryDetails();
+    return true;
+  }
   function clearLibraryDrag({ preserveSuppression = false } = {}) {
     if (libraryDrag.timer) window.clearTimeout(libraryDrag.timer);
     libraryDrag.timer = null;
@@ -2455,6 +2593,7 @@
     libraryDrag.row = null;
     libraryDrag.pointerId = null;
     libraryDrag.active = false;
+    libraryDrag.additive = false;
     libraryDrag.targetFolder = null;
     if (!preserveSuppression) libraryDrag.suppressClickUntil = 0;
   }
@@ -2485,13 +2624,27 @@
   }
   function handleLibraryPointerDown(event) {
     if (event.button !== 0) return;
+    if (isLibraryGraphSurface(event.target)) return;
+    // A new pointer gesture supersedes a pending click from the previous
+    // marquee; this prevents an unrelated button click from being consumed if
+    // the browser delivered events out of order.
+    libraryMarquee.suppressNextClick = false;
     const row = event.target.closest('.library-row');
-    if (!row || event.target.closest('button, select, input, a, [data-row-more-menu], .reading-status-menu')) return;
+    const interactive = event.target.closest('button, select, input, a, [data-row-more-menu], .reading-status-menu');
+    const surface = librarySelectionSurface(event.currentTarget);
+    if (!row && !interactive && surface) {
+      clearLibraryDrag();
+      beginLibraryMarquee(surface, event);
+      return;
+    }
+    if (!row || interactive) return;
+    clearLibraryMarquee();
     clearLibraryDrag();
     libraryDrag.row = row;
     libraryDrag.pointerId = event.pointerId;
     libraryDrag.startX = event.clientX;
     libraryDrag.startY = event.clientY;
+    libraryDrag.additive = event.metaKey || event.ctrlKey;
     libraryDrag.timer = window.setTimeout(() => {
       if (!libraryDrag.row) return;
       libraryDrag.active = true;
@@ -2508,15 +2661,34 @@
     }, 420);
   }
   function handleLibraryPointerMove(event) {
+    if (libraryMarquee.list && event.pointerId === libraryMarquee.pointerId) {
+      updateLibraryMarquee(event);
+      return;
+    }
     if (!libraryDrag.row || event.pointerId !== libraryDrag.pointerId) return;
     const moved = Math.hypot(event.clientX - libraryDrag.startX, event.clientY - libraryDrag.startY) > 8;
-    if (!libraryDrag.active && moved) { clearLibraryDrag(); return; }
+    if (!libraryDrag.active && moved) {
+      const surface = librarySelectionSurface(libraryDrag.row);
+      const startX = libraryDrag.startX;
+      const startY = libraryDrag.startY;
+      const additive = libraryDrag.additive;
+      clearLibraryDrag();
+      if (surface) {
+        beginLibraryMarquee(surface, event, { startX, startY, additive });
+        updateLibraryMarquee(event);
+      }
+      return;
+    }
     if (!libraryDrag.active) return;
     event.preventDefault();
     if (libraryDrag.ghost) { libraryDrag.ghost.style.left = `${event.clientX + 14}px`; libraryDrag.ghost.style.top = `${event.clientY + 14}px`; }
     updateLibraryDragTarget(event.clientX, event.clientY);
   }
   function handleLibraryPointerUp(event) {
+    if (libraryMarquee.list && event.pointerId === libraryMarquee.pointerId) {
+      finishLibraryMarquee(event);
+      return;
+    }
     if (!libraryDrag.row || event.pointerId !== libraryDrag.pointerId) return;
     if (libraryDrag.active) { event.preventDefault(); finishLibraryDrag(); }
     else clearLibraryDrag();
@@ -2526,11 +2698,13 @@
     if (!select) return;
     updateLibraryItem(select.dataset.jobId, { values: { reading_status: select.value } });
   }
+  $$('.library-main, .view-editor').forEach((surface) => {
+    surface.addEventListener('click', handleLibraryListClick);
+    surface.addEventListener('pointerdown', handleLibraryPointerDown);
+  });
   ['#recent-list', '#view-results'].forEach((selector) => {
     const list = $(selector);
-    list?.addEventListener('click', handleLibraryListClick);
     list?.addEventListener('dblclick', handleLibraryListDblClick);
-    list?.addEventListener('pointerdown', handleLibraryPointerDown);
     list?.addEventListener('change', handleLibraryListChange);
     list?.addEventListener('focusin', (event) => { const row = event.target.closest('.library-row'); if (row && !state.selectedLibraryJobIds.size) selectLibraryRow(row); });
     list?.addEventListener('focusin', (event) => { const star = event.target.closest('[data-inline-importance]'); if (star) previewInlineRating(star.closest('[data-inline-rating]'), star.dataset.inlineImportance); });
@@ -2906,20 +3080,119 @@
     try { const payload = await api(`/api/library/items/${jobId}/trash`, jsonOptions({})); await refreshLibraryFrom(payload); }
     catch (error) { showToast(error.message, true); }
   }
+
+  async function removeDeletedDocumentState(jobId) {
+    const run = state.translationRuns.get(jobId);
+    if (run?.running) cancelTranslationRun(run);
+    state.translationRuns.delete(jobId);
+    state.translationCaches.delete(jobId);
+    state.jobs = state.jobs.filter((job) => job.job_id !== jobId);
+    state.mediaLayouts.delete(jobId);
+    state.chatSessions.delete(jobId);
+    if (readingLocationsState.locations[jobId]) {
+      delete readingLocationsState.locations[jobId];
+      readingLocationsState.lru = readingLocationsState.lru.filter((candidate) => candidate !== jobId);
+      if (readingLocationsState.lastActiveJobId === jobId) readingLocationsState.lastActiveJobId = null;
+      persistReadingLocations();
+    }
+    const index = state.openDocuments.findIndex((item) => item.job_id === jobId);
+    if (index < 0) {
+      if (state.activeJob?.job_id === jobId) {
+        state.activeJob = null;
+        activeJobId = null;
+        state.translationCache = [];
+        state.translationRun = null;
+        if (readerMount?.saveTimer) window.clearTimeout(readerMount.saveTimer);
+        if (readerMount?.saveMaxTimer) window.clearTimeout(readerMount.saveMaxTimer);
+        if (readerMount?.lateRestoreTimer) window.clearTimeout(readerMount.lateRestoreTimer);
+        readerMount = null;
+        readerSections = [];
+        $('#html-preview')?.setAttribute('src', 'about:blank');
+        switchView('library-view');
+      } else {
+        renderDocumentTabs();
+      }
+      return;
+    }
+    const wasActive = state.activeJob?.job_id === jobId;
+    state.openDocuments.splice(index, 1);
+    persistOpenDocuments();
+    if (!wasActive) {
+      renderDocumentTabs();
+      return;
+    }
+    const next = state.openDocuments[index] || state.openDocuments[index - 1];
+    if (next) {
+      openReader(next, { addTab: false });
+      // openReader captures the outgoing viewport before mounting the next
+      // tab; remove that location again because this document no longer exists.
+      delete readingLocationsState.locations[jobId];
+      readingLocationsState.lru = readingLocationsState.lru.filter((candidate) => candidate !== jobId);
+      if (readingLocationsState.lastActiveJobId === jobId) readingLocationsState.lastActiveJobId = null;
+      persistReadingLocations();
+      return;
+    }
+    state.activeJob = null;
+    activeJobId = null;
+    state.translationCache = [];
+    state.translationRun = null;
+    if (readerMount?.saveTimer) window.clearTimeout(readerMount.saveTimer);
+    if (readerMount?.saveMaxTimer) window.clearTimeout(readerMount.saveMaxTimer);
+    if (readerMount?.lateRestoreTimer) window.clearTimeout(readerMount.lateRestoreTimer);
+    readerMount = null;
+    readerSections = [];
+    $('#html-preview')?.setAttribute('src', 'about:blank');
+    switchView('library-view');
+  }
+
+  async function permanentlyDeleteLibraryItem(jobId) {
+    const entry = libraryEntryById(jobId);
+    if (!entry?.item?.deleted_at) { showToast('只有回收站中的文献可以彻底清除。', true); return; }
+    if (!await requestConfirmation('彻底清除这篇文献？原始 PDF、解析结果、译文、笔记和批注都会被删除，且无法恢复。', '彻底清除文献')) return;
+    try {
+      const payload = await api(`/api/library/items/${jobId}/permanent`, { method: 'DELETE' });
+      await removeDeletedDocumentState(jobId);
+      await refreshLibraryFrom(payload);
+      clearLibrarySelection();
+    } catch (error) { showToast(error.message, true); }
+  }
   async function applyBulkRowAction(jobIds, action) {
     const ids = [...new Set(jobIds)].filter(Boolean);
     if (!ids.length) return;
+    if (action === 'permanent' && ids.some((id) => !libraryEntryById(id)?.item?.deleted_at)) {
+      showToast('只能彻底清除全部位于回收站的选中文献。', true);
+      return;
+    }
     if (action === 'folders') { await editLibraryFoldersBulk(ids); return; }
     if (action === 'trash' && !await requestConfirmation(`将选中的 ${ids.length} 篇文献移入本机回收站？`, '批量移入回收站')) return;
+    if (action === 'permanent' && !await requestConfirmation(`彻底清除选中的 ${ids.length} 篇文献？原始 PDF、解析结果、译文、笔记和批注都会被删除，且无法恢复。`, '批量彻底清除')) return;
     try {
-      for (const id of ids) {
-        const endpoint = action === 'trash' ? 'trash' : 'restore';
-        await api(`/api/library/items/${id}/${endpoint}`, jsonOptions({}));
+      const deletedIds = [];
+      let batchPayload = null;
+      if (action === 'permanent') {
+        batchPayload = await api('/api/library/items/permanent', jsonOptions({ job_ids: ids }));
+        (Array.isArray(batchPayload.deleted) ? batchPayload.deleted : []).forEach((id) => deletedIds.push(id));
+      } else {
+        for (const id of ids) {
+          const endpoint = action === 'trash' ? 'trash' : 'restore';
+          await api(`/api/library/items/${id}/${endpoint}`, jsonOptions({}));
+        }
       }
-      await loadLibrary();
+      for (const id of deletedIds) await removeDeletedDocumentState(id);
+      if (batchPayload?.library) state.library = batchPayload.library;
+      else await loadLibrary();
       clearLibrarySelection();
       renderLibrary(); renderViews();
-    } catch (error) { showToast(`批量操作失败：${error.message}`, true); }
+      const failed = Array.isArray(batchPayload?.failed) ? batchPayload.failed : [];
+      if (failed.length) {
+        const detail = failed.slice(0, 2).map((item) => item?.error).filter(Boolean).join('；');
+        showToast(`已清除 ${deletedIds.length} 篇，${failed.length} 篇失败${detail ? `：${detail}` : '。'}`, true);
+      }
+    } catch (error) {
+      await loadLibrary();
+      renderLibrary(); renderViews();
+      showToast(`批量操作失败：${error.message}`, true);
+    }
   }
   async function restoreLibraryItem(jobId) {
     try { const payload = await api(`/api/library/items/${jobId}/restore`, jsonOptions({})); await refreshLibraryFrom(payload); }
@@ -3780,10 +4053,13 @@
   let selectionTranslationTimer = null;
   let selectionTranslationToken = 0;
   let selectionTranslationKey = '';
+  let selectionTranslationAbortController = null;
 
   function clearSelectionPopover({ clearState = false, immediate = false } = {}) {
     window.clearTimeout(selectionTranslationTimer);
     selectionTranslationTimer = null;
+    selectionTranslationAbortController?.abort();
+    selectionTranslationAbortController = null;
     selectionTranslationToken += 1;
     selectionTranslationKey = '';
     const popover = $('#selection-popover');
@@ -3871,6 +4147,9 @@
     }
     renderSelectionTranslation('loading');
     const jobId = state.activeJob?.job_id;
+    selectionTranslationAbortController?.abort();
+    const abortController = new AbortController();
+    selectionTranslationAbortController = abortController;
     // Collapse whitespace only in the translation copy; the persisted
     // annotation anchor already uses the canonical block text and offsets.
     const quote = String(selection.quote || '').replace(/\s+/g, ' ').trim();
@@ -3884,6 +4163,7 @@
         const translated = await requestTranslation(quote, null, [], {
           jobId,
           onDelta: (partial) => { if (!stale()) renderSelectionTranslation('streaming', { text: partial }); },
+          signal: abortController.signal,
         });
         if (stale()) return;
         renderSelectionTranslation('ready', { text: translated.text, formulas: translated.formulas });
@@ -3891,6 +4171,8 @@
         if (stale()) return;
         const detail = String(error.message || '未知错误');
         renderSelectionTranslation('error', { message: /^翻译失败[：:]/u.test(detail) ? detail : `翻译失败：${detail}` });
+      } finally {
+        if (selectionTranslationAbortController === abortController) selectionTranslationAbortController = null;
       }
     }, immediate || cachedHit ? 0 : 180);
   }
@@ -6348,8 +6630,8 @@
     return translationCacheFor(jobId).find((item) => item.block_id === (blockId || '') && item.source_hash === sourceHash && item.target_language === targetLanguage && String(item.profile_id || '') === profileId);
   }
 
-  async function streamApiRequest(url, body, onDelta) {
-    const response = await fetch(url, jsonOptions({ ...body, stream: true }));
+  async function streamApiRequest(url, body, onDelta, signal = null) {
+    const response = await fetch(url, { ...jsonOptions({ ...body, stream: true }), ...(signal ? { signal } : {}) });
     const contentType = response.headers.get('Content-Type') || '';
     if (!response.ok || !response.body || !contentType.includes('text/event-stream')) {
       const payload = await response.json().catch(() => ({}));
@@ -6394,9 +6676,10 @@
     return result;
   }
 
-  async function requestTranslation(text, blockId = null, suppliedFormulas = [], { jobId = state.activeJob?.job_id, onDelta = null, markers = [], emphasis = [] } = {}) {
+  async function requestTranslation(text, blockId = null, suppliedFormulas = [], { jobId = state.activeJob?.job_id, onDelta = null, markers = [], emphasis = [], signal = null } = {}) {
     const originalText = String(text || '').trim();
     const sourceHash = hashText(originalText);
+    const profileId = translationProfileId();
     const mathPayload = suppliedFormulas.length ? { text: originalText, formulas: suppliedFormulas } : protectInlineMath(originalText);
     const tokenPayload = protectSpecialTokens(mathPayload.text);
     const protectedPayload = { text: tokenPayload.text, formulas: mathPayload.formulas, tokens: tokenPayload.tokens };
@@ -6430,16 +6713,18 @@
         streamed += delta;
         const partial = repairFormulaTokens(streamed, protectedPayload.formulas);
         onDelta(restoreSpecialTokens(restoreInlineMarkers(restoreInlineMath(partial, protectedPayload.formulas), markers), protectedPayload.tokens));
-      });
+      }, signal);
     } else {
-      result = (await api(`/api/jobs/${jobId}/translate`, jsonOptions(requestBody))).result || {};
+      result = (await api(`/api/jobs/${jobId}/translate`, { ...jsonOptions(requestBody), ...(signal ? { signal } : {}) })).result || {};
     }
+    if (signal?.aborted) throw new DOMException('翻译请求已取消。', 'AbortError');
+    if (profileId && translationProfileId() !== profileId) throw new Error('翻译模型已切换，请重试。');
     if (!result.text) throw new Error('模型返回为空。');
     const formulas = protectedPayload.formulas;
     const repaired = repairFormulaTokens(result.text, formulas);
-    const record = { ...result, text: repaired, formulas, block_id: blockId || '', target_language: targetLanguage, source_hash: sourceHash };
+    const record = { ...result, text: repaired, formulas, profile_id: result.profile_id || profileId, block_id: blockId || '', target_language: targetLanguage, source_hash: sourceHash };
     const cache = translationCacheFor(jobId);
-    const index = cache.findIndex((item) => item.block_id === record.block_id && item.source_hash === sourceHash && item.target_language === targetLanguage);
+    const index = cache.findIndex((item) => item.block_id === record.block_id && item.source_hash === sourceHash && item.target_language === targetLanguage && String(item.profile_id || '') === String(record.profile_id || ''));
     if (index >= 0) cache[index] = record; else cache.push(record);
     setTranslationCacheFor(jobId, cache);
     return {
@@ -6482,20 +6767,29 @@
     return node;
   }
 
-  async function translateBlock(blockId, trigger = null, { silent = false, jobId = state.activeJob?.job_id, doc = frameDocument() } = {}) {
+  async function translateBlock(blockId, trigger = null, { silent = false, jobId = state.activeJob?.job_id, doc = frameDocument(), signal = null } = {}) {
     if (!jobId || !blockId || !doc) return false;
     const block = translationTarget(blockId, doc);
     const source = paragraphSource(block);
     const text = source.text;
     if (!text) return false;
+    const profileId = translationProfileId();
     if (trigger) { trigger.disabled = true; trigger.textContent = '…'; }
     const isTitle = block?.matches('h1.paper-title, h1[data-translate-block-id]');
     insertTranslation(blockId, '正在翻译…', { pending: true, role: isTitle ? 'title' : '', doc });
+    const removePendingTranslation = () => {
+      doc.querySelectorAll(`.my-scholar-translation[data-for="${cssEscape(blockId || '')}"]`).forEach((node) => {
+        if (node.classList.contains('is-pending')) node.remove();
+      });
+    };
     try {
-      const translated = await requestTranslation(text, blockId, source.formulas, { jobId, markers: source.markers, emphasis: source.emphasis });
+      const translated = await requestTranslation(text, blockId, source.formulas, { jobId, markers: source.markers, emphasis: source.emphasis, signal });
       // A user can switch tabs while the gateway request is in flight. Never
       // insert an old document's response into the newly active iframe.
-      if (state.activeJob?.job_id !== jobId || frameDocument() !== doc) return false;
+      if (state.activeJob?.job_id !== jobId || frameDocument() !== doc || (profileId && translationProfileId() !== profileId)) {
+        removePendingTranslation();
+        return false;
+      }
       insertTranslation(blockId, translated.text, {
         cached: translated.cached,
         sourceHash: translated.sourceHash,
@@ -6508,10 +6802,14 @@
       if (!silent) setPanelStatus(translated.cached ? '已使用本地翻译缓存。' : '本段翻译已插入原文下方。');
       return true;
     } catch (error) {
-      if (state.activeJob?.job_id === jobId && frameDocument() === doc) {
+      if (error?.name === 'AbortError' || signal?.aborted) {
+        removePendingTranslation();
+        return false;
+      }
+      if (state.activeJob?.job_id === jobId && frameDocument() === doc && (!profileId || translationProfileId() === profileId)) {
         insertTranslation(blockId, `翻译失败：${error.message}`, { error: true, role: isTitle ? 'title' : '', doc });
         if (!silent) setPanelStatus(error.message, true);
-      }
+      } else removePendingTranslation();
       return false;
     } finally {
       if (trigger) { trigger.disabled = false; trigger.textContent = '译'; }
@@ -6599,6 +6897,8 @@
     return Boolean(cachedTranslation(blockId, sourceHash, '中文')?.text);
   }
 
+  const FULL_TRANSLATION_CONCURRENCY = 3;
+
   async function runFullTranslation() {
     const jobId = state.activeJob?.job_id;
     if (!jobId) return;
@@ -6614,7 +6914,7 @@
     if (!doc) return;
     const blocks = [...(doc?.querySelectorAll('h1.paper-title[data-block-id], p[data-block-id], ul[data-block-id], ol[data-block-id], figcaption[data-translate-block-id]') || [])].filter(translatableParagraph);
     const pendingBlocks = blocks.filter((block) => !hasUsableTranslation(block));
-    const run = { jobId, doc, running: true, stop: false };
+    const run = { jobId, doc, running: true, stop: false, abortController: new AbortController() };
     state.translationRuns.set(jobId, run);
     state.translationRun = run;
     const isCurrentRun = () => state.activeJob?.job_id === jobId
@@ -6626,16 +6926,27 @@
     let done = blocks.length - pendingBlocks.length;
     updateTranslationProgress(done, blocks.length, true);
     let failed = 0;
+    let nextIndex = 0;
     try {
-      for (const block of pendingBlocks) {
-        if (run.stop || !isCurrentRun()) break;
-        const preview = paragraphText(block).slice(0, 72);
-        updateTranslationProgress(done, blocks.length, true, preview ? `正在翻译：${preview}` : '');
-        const translated = await translateBlock(block.dataset.blockId || block.dataset.translateBlockId, block.querySelector('.paragraph-translate-trigger'), { silent: true, jobId, doc });
-        if (!translated) failed += 1;
-        done += 1;
-        if (isCurrentRun()) updateTranslationProgress(done, blocks.length, true, preview ? `正在翻译：${preview}` : '');
-      }
+      const worker = async () => {
+        while (!run.stop && !run.abortController.signal.aborted && isCurrentRun()) {
+          const index = nextIndex++;
+          const block = pendingBlocks[index];
+          if (!block) return;
+          let translated = false;
+          try {
+            const preview = paragraphText(block).slice(0, 72);
+            updateTranslationProgress(done, blocks.length, true, preview ? `正在翻译：${preview}` : '');
+            translated = await translateBlock(block.dataset.blockId || block.dataset.translateBlockId, block.querySelector('.paragraph-translate-trigger'), { silent: true, jobId, doc, signal: run.abortController.signal });
+          } catch (error) {
+            translated = false;
+          }
+          if (!translated && !run.abortController.signal.aborted) failed += 1;
+          done += 1;
+          if (isCurrentRun()) updateTranslationProgress(done, blocks.length, true);
+        }
+      };
+      await Promise.all(Array.from({ length: Math.min(FULL_TRANSLATION_CONCURRENCY, pendingBlocks.length) }, worker));
       if (!isCurrentRun()) return;
       if (run.stop) {
         $('#translation-progress-label').textContent = '全文翻译已停止，可继续复用已完成缓存';
@@ -6665,11 +6976,17 @@
     }
   }
 
+  function cancelTranslationRun(run) {
+    if (!run) return;
+    run.stop = true;
+    run.abortController?.abort();
+  }
+
   function stopFullTranslation() {
     const jobId = state.activeJob?.job_id;
     const run = jobId ? state.translationRuns.get(jobId) : null;
     if (run?.running) {
-      run.stop = true;
+      cancelTranslationRun(run);
       $('#stop-translation-button').disabled = true;
     }
   }
@@ -8089,7 +8406,7 @@
       // into a document that is no longer mounted. Keep its per-document cache
       // and stop it cleanly; another document remains independently runnable.
       const previousRun = state.translationRuns.get(previousJobId);
-      if (previousRun?.running) previousRun.stop = true;
+      if (previousRun?.running) cancelTranslationRun(previousRun);
     }
     const nextCache = state.translationCaches.get(job.job_id) || [];
     state.translationCaches.set(job.job_id, nextCache);
@@ -8678,7 +8995,7 @@
     const info = context.app || {};
     if ($('#app-current-version')) $('#app-current-version').textContent = info.version ? `v${info.version}` : '未知';
     if ($('#app-platform-arch')) $('#app-platform-arch').textContent = info.arch === 'arm64' ? 'macOS · Apple Silicon' : `macOS · ${info.arch || '未知架构'}`;
-    if ($('#app-update-channel')) $('#app-update-channel').textContent = info.channel === 'beta' ? '测试版' : info.channel === 'internal' ? 'Preview / 内部预览' : String(info.channel || '稳定版');
+    if ($('#app-update-channel')) $('#app-update-channel').textContent = info.channel === 'beta' ? '测试版' : info.channel === 'internal' ? '开源发布版' : String(info.channel || '稳定版');
   }
 
   async function loadAppInfo() {
@@ -8909,15 +9226,21 @@
       const config = settings?.[service] || {};
       const baseURL = $(`#setting-${service}-base-url`);
       const model = $(`#setting-${service}-model`);
+      const mode = service === 'translation' ? $('#setting-translation-mode') : null;
       const apiKey = $(`#setting-${service}-api-key`);
       const clearKey = $(`#setting-${service}-clear-key`);
       if (baseURL) baseURL.value = String(config.base_url || '');
       if (model) model.value = String(config.model || '');
+      if (mode) mode.value = config.mode === 'chat' ? 'chat' : 'qwen-mt';
       if (apiKey) {
         apiKey.value = '';
         apiKey.placeholder = config.api_key_configured ? '已配置；留空保持不变' : '输入服务密钥（可选）';
       }
-      if (clearKey) clearKey.checked = false;
+      if (clearKey) {
+        clearKey.dataset.clearRequested = 'false';
+        clearKey.disabled = !Boolean(config.api_key_configured);
+        clearKey.title = config.api_key_configured ? clearKey.getAttribute('aria-label') || '清除已保存的 API Key' : '当前没有已保存的 API Key';
+      }
       aiModelLists[service] = [];
       const picker = $(`#setting-${service}-model-picker`);
       const modelList = $(`#setting-${service}-model-list`);
@@ -8935,8 +9258,18 @@
       base_url: $(`#setting-${service}-base-url`)?.value.trim() || '',
       model: $(`#setting-${service}-model`)?.value.trim() || '',
       api_key: $(`#setting-${service}-api-key`)?.value || '',
-      clear_api_key: Boolean($(`#setting-${service}-clear-key`)?.checked),
+      clear_api_key: $(`#setting-${service}-clear-key`)?.dataset.clearRequested === 'true',
+      ...(service === 'translation' ? { mode: $('#setting-translation-mode')?.value === 'chat' ? 'chat' : 'qwen-mt' } : {}),
     }]));
+  }
+
+  function clearSavedAIKey(service, button) {
+    if (!button || button.disabled) return;
+    const apiKey = $(`#setting-${service}-api-key`);
+    if (apiKey) apiKey.value = '';
+    button.dataset.clearRequested = 'true';
+    button.disabled = true;
+    queueSettingsSave(true);
   }
 
   function renderAIModelList(service) {
@@ -9883,6 +10216,9 @@
   $$('[data-ai-reuse-source]').forEach((button) => {
     button.addEventListener('click', () => reuseAIProfile(button.dataset.aiReuseSource, button.dataset.aiReuseTarget, button));
   });
+  $$('[data-ai-clear-key]').forEach((button) => {
+    button.addEventListener('click', () => clearSavedAIKey(button.dataset.aiClearKey, button));
+  });
   $$('[id$="-model-filter"]').forEach((input) => {
     const service = input.id.replace(/^setting-(translation|chat)-model-filter$/u, '$1');
     input.addEventListener('input', () => renderAIModelList(service));
@@ -10300,11 +10636,15 @@
   // Health probe, application shortcuts and initial data loading.
   async function checkHealth() {
     try {
+      const previousProfileId = translationProfileId();
       const payload = await api('/api/health');
       state.health = payload;
+      const nextProfileId = translationProfileId();
+      if (previousProfileId !== nextProfileId) {
+        state.translationRuns.forEach((run) => { if (run?.running) cancelTranslationRun(run); });
+        clearRenderedTranslations();
+      }
       document.body.classList.toggle('readonly-mode', Boolean(payload.readonly));
-      state.translationCaches.forEach((records, jobId) => state.translationCaches.set(jobId, translationsForActiveProfile(records)));
-      state.translationCache = translationsForActiveProfile(state.translationCache);
       if (state.activeJob && frameDocument()) ensureTitleTranslation();
     } catch (_) {
       state.health = null;
