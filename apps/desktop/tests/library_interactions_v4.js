@@ -614,6 +614,13 @@ async function waitForLibrary(page) {
     if (await selectedRows().count() < 2) throw new Error('从列表下方空白列开始框选没有选中多篇文献。');
     await page.mouse.click(outsideStart.x, outsideStart.y);
     if (await selectedRows().count() !== 0) throw new Error('点击列表下方空白列没有清空框选结果。');
+
+    // Command+A selects every row currently visible in the library while
+    // leaving native text selection untouched in editable controls.
+    await rowBody(firstId).click();
+    await page.keyboard.press('Meta+A');
+    if (await selectedRows().count() !== rowIds.length) throw new Error('Command+A 没有选中当前可见的全部文献。');
+
     await rowBody(firstId).click();
     await page.keyboard.down('Meta');
     await rowBody(secondId).click();
@@ -646,6 +653,7 @@ async function waitForLibrary(page) {
       marqueeRowStart: true,
       marqueeDelayedRelease: true,
       marqueeOutsideListSurface: true,
+      commandASelectAll: true,
       multiSelectionContextMenu: true,
       errors,
     }));

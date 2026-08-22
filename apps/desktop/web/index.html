@@ -234,6 +234,13 @@
             <div id="reader-chapter-list" class="reader-chapter-list" role="list"></div>
             <div id="reader-chapter-tooltip" class="reader-chapter-tooltip" role="tooltip" hidden></div>
           </nav>
+          <div id="reader-search" class="reader-search" role="search" aria-label="搜索正文" hidden>
+            <input id="reader-search-input" type="search" autocomplete="off" spellcheck="false" placeholder="搜索正文" aria-label="搜索正文">
+            <span id="reader-search-count" class="reader-search-count" role="status" aria-live="polite" aria-atomic="true"></span>
+            <button id="reader-search-prev" class="reader-search-button" type="button" title="上一个匹配" aria-label="上一个匹配">↑</button>
+            <button id="reader-search-next" class="reader-search-button" type="button" title="下一个匹配" aria-label="下一个匹配">↓</button>
+            <button id="reader-search-close" class="reader-search-button reader-search-close" type="button" title="关闭搜索" aria-label="关闭搜索">×</button>
+          </div>
           <iframe id="html-preview" title="论文阅读器" loading="eager"></iframe>
           <div id="selection-popover" class="selection-popover" hidden>
             <div class="selection-actions" role="toolbar" aria-label="选中文本操作">

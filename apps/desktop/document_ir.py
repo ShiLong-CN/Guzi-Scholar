@@ -392,6 +392,131 @@ def _caption_figures(elements: List[Dict[str, Any]], page_width: float, page_hei
     return kept, suppressed
 
 
+def _figure_number(text: str) -> Optional[str]:
+    match = re.search(r"\bfig(?:ure)?\s*\.?\s*(\d+)\b", str(text or ""), flags=re.IGNORECASE)
+    return match.group(1) if match else None
+
+
+def _visual_gap(left: Sequence[float], right: Sequence[float]) -> Tuple[float, float]:
+    if len(left) != 4 or len(right) != 4:
+        return float("inf"), float("inf")
+    horizontal = max(0.0, max(left[0], right[0]) - min(left[2], right[2]))
+    vertical = max(0.0, max(left[1], right[1]) - min(left[3], right[3]))
+    return horizontal, vertical
+
+
+def _merge_mineru_figure_fragments(
+    elements: List[Dict[str, Any]], page_width: float, page_height: float,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Keep a multi-panel figure as one PDF crop instead of panel crops.
+
+    MinerU may expose a single author-composed figure as several ``chart``
+    elements (for example a main plot, color bar, and two small panels).  A
+    repeated Figure number is the only reliable semantic link available at
+    this stage, so we additionally require all fragments to form one compact
+    visual region before coalescing them.
+    """
+    groups: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    visual_candidates = [
+        element for element in elements
+        if element.get("type") == "image" and element.get("source") == "mineru"
+    ]
+    for element in elements:
+        if element.get("type") != "image" or element.get("source") != "mineru":
+            continue
+        number = _figure_number(str(element.get("text") or ""))
+        if number:
+            groups[number].append(element)
+
+    suppressed: List[Dict[str, Any]] = []
+    consumed: set[str] = set()
+    for number, candidates in groups.items():
+        candidates = [item for item in candidates if str(item.get("id") or "") not in consumed]
+        max_gap = max(page_width, page_height) * 0.16
+        expanded = list(candidates)
+        expanded_ids = {str(item.get("id") or "") for item in expanded}
+        changed = True
+        while changed:
+            changed = False
+            for candidate in visual_candidates:
+                candidate_id = str(candidate.get("id") or "")
+                if candidate_id in expanded_ids or candidate_id in consumed or _figure_number(str(candidate.get("text") or "")):
+                    continue
+                candidate_text = str(candidate.get("text") or "").strip()
+                if candidate_text and len(candidate_text) > 80:
+                    continue
+                if any(max(_visual_gap(candidate.get("bbox") or [], other.get("bbox") or [])) <= max_gap for other in expanded):
+                    expanded.append(candidate)
+                    expanded_ids.add(candidate_id)
+                    changed = True
+        candidates = expanded
+        if len(candidates) < 2:
+            continue
+        boxes = [item.get("bbox") for item in candidates if _bbox(item.get("bbox"))]
+        if len(boxes) < 2:
+            continue
+        union = _union(boxes)
+        if not union:
+            continue
+        # Reject unrelated same-number nodes that are separated by a full
+        # column or page-sized gap.  Panels and legends normally touch or sit
+        # within a small gutter of another fragment.
+        connected: set[str] = {str(candidates[0].get("id") or "")}
+        changed = True
+        while changed:
+            changed = False
+            for candidate in candidates:
+                candidate_id = str(candidate.get("id") or "")
+                if candidate_id in connected:
+                    continue
+                if any(max(_visual_gap(candidate.get("bbox") or [], other.get("bbox") or [])) <= max_gap for other in candidates if str(other.get("id") or "") in connected):
+                    connected.add(candidate_id)
+                    changed = True
+        if len(connected) < 2 or len(connected) != len(candidates):
+            continue
+
+        captioned = sorted(candidates, key=lambda item: (len(str(item.get("text") or "")), -int(item.get("source_index") or 0)), reverse=True)[0]
+        source_id = f"{captioned.get('source_id') or captioned.get('source_index')}-composite"
+        render = copy.deepcopy(captioned.get("render") or {})
+        render["bbox"] = union
+        content = render.get("content") if isinstance(render.get("content"), dict) else {}
+        render["content"] = content
+        merged = _canonical_element(
+            page=int(captioned.get("page") or 1),
+            source_id=source_id,
+            source_index=min(int(item.get("source_index") or 0) for item in candidates),
+            kind="image",
+            box=union,
+            text=str(captioned.get("text") or "").strip(),
+            source="mineru-composite",
+            render=render,
+            confidence=min(float(item.get("confidence") or 0.0) for item in candidates),
+            flags=set().union(*(item.get("flags") or [] for item in candidates)) | {"composite-visual", "source-crop"},
+        )
+        merged["fragments"] = [fragment for item in candidates for fragment in item.get("fragments", [])]
+        merged["visual_fragments"] = [
+            {"id": item.get("id"), "bbox": item.get("bbox"), "text": item.get("text", "")}
+            for item in candidates
+        ]
+        elements.append(merged)
+        consumed.update(str(item.get("id") or "") for item in candidates)
+        for item in candidates:
+            suppressed.append({
+                "id": item.get("id"), "page": item.get("page"), "type": item.get("type"),
+                "bbox": item.get("bbox"), "text": item.get("text", ""),
+                "reason": "composite-figure-fragment", "figure": number,
+            })
+
+    if not consumed:
+        return elements, suppressed
+    kept = [
+        item for item in elements
+        if str(item.get("id") or "") not in consumed and item.get("source") != "mineru-composite"
+    ]
+    kept.extend(item for item in elements if item.get("source") == "mineru-composite")
+    return kept, suppressed
+
+
 def _is_barrier(element: Dict[str, Any], page_width: float) -> bool:
     box = element["bbox"]
     if not box:
@@ -2190,6 +2315,8 @@ def mineru_to_ir(
                 suppressed.append({"id": element["id"], "page": page_index, "type": kind, "bbox": box, "text": "", "reason": "empty-text"})
                 continue
             elements.append(element)
+        elements, composite_suppressed = _merge_mineru_figure_fragments(elements, max_x, max_y)
+        suppressed.extend(composite_suppressed)
         if page_index == 1:
             elements = _order_first_page(elements, max_x)
         else:

@@ -569,6 +569,7 @@ let browserSession;
     const markerRect = marker.getBoundingClientRect();
     return {
       indent: parseFloat(getComputedStyle(item).getPropertyValue('--reader-section-rail-indent')) || 0,
+      left: markerRect.left,
       width: markerRect.width,
       height: markerRect.height,
       color: markerStyle.backgroundColor,
@@ -577,6 +578,8 @@ let browserSession;
     };
   }));
   if (railMarkerStyles.some((marker) => marker.height > 3 || marker.width < 6 || marker.width <= marker.height * 2)) throw new Error(`Chapter rail still rendered dot-shaped markers (${JSON.stringify(railMarkerStyles)})`);
+  const railMarkerLefts = [...new Set(railMarkerStyles.map((marker) => Math.round(marker.left * 100) / 100))];
+  if (railMarkerLefts.length > 1) throw new Error(`Chapter rail markers are not left-aligned (${JSON.stringify(railMarkerStyles)})`);
   const railMarkerByIndent = [...new Map(railMarkerStyles.map((marker) => [marker.indent, marker.width])).entries()].sort((left, right) => left[0] - right[0]);
   if (railMarkerByIndent.length > 1 && railMarkerByIndent.some((entry, index) => index > 0 && entry[1] >= railMarkerByIndent[index - 1][1])) throw new Error(`Chapter rail hierarchy did not shorten deeper markers (${JSON.stringify(railMarkerByIndent)})`);
   const activeRailMarker = railMarkerStyles.find((marker) => marker.active);

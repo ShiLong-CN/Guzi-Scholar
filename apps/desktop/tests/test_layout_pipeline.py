@@ -494,6 +494,32 @@ class LayoutPipelineTest(unittest.TestCase):
         self.assertIsNone(fallback["actual_dpi"])
         self.assertIsNone(fallback["pixel_width"])
 
+    def test_composite_visual_never_uses_the_whole_page_as_a_fallback(self) -> None:
+        pages = [[{
+            "type": "image",
+            "bbox": [10, 10, 500, 500],
+            "content": {
+                "image_caption": "Figure 1. Composite source.",
+                "image_source": {"path": "images/panel-a.jpg"},
+            },
+            "_ir": {"block_id": "block-1-composite-image", "source": "mineru-composite"},
+        }]]
+
+        document, metadata = _build_document_html(
+            "fixture.pdf",
+            pages,
+            {"panel-a.jpg": "assets/images/panel-a.jpg"},
+            ["page-1.png"],
+            {},
+            visual_assets={},
+        )
+
+        self.assertNotIn('src="pages/page-1.png"', document)
+        visual = metadata["pages"][0]["elements"][0]
+        self.assertEqual(visual["visual_source"], "source-unavailable")
+        self.assertIsNone(visual["visual_asset"])
+        self.assertTrue(visual["visual_fallback"])
+
     def test_ir_block_ids_and_provenance_reach_reader_metadata(self) -> None:
         pages = [[{
             "type": "paragraph",
@@ -650,6 +676,40 @@ class LayoutPipelineTest(unittest.TestCase):
             self.assertTrue(wide_asset.endswith("@300.png"))
             self.assertGreaterEqual(wide.width, 2_100)
             self.assertEqual(crop_metadata["block-1-1-table"]["actual_dpi"], 300)
+
+    def test_pdf_visual_crops_use_mineru_normalized_canvas_when_source_is_marked(self) -> None:
+        try:
+            import fitz  # type: ignore
+        except ImportError:
+            self.skipTest("PyMuPDF is not installed")
+        with tempfile.TemporaryDirectory(prefix="my-scholar-normalized-crop-test-") as temp:
+            root = Path(temp)
+            source = root / "source.pdf"
+            document = fitz.open()
+            page = document.new_page(width=612, height=792)
+            page.draw_rect(fitz.Rect(110, 212, 502, 431), color=(0, 0, 0), fill=(0.8, 0.8, 0.8))
+            document.save(source)
+            document.close()
+            crop_metadata = {}
+            crops = _render_pdf_visual_crops(
+                source,
+                [[{
+                    "type": "image",
+                    "bbox": [179, 267, 820, 544],
+                    "_ir": {"block_id": "normalized-figure", "source": "mineru-composite"},
+                }]],
+                root / "assets" / "images",
+                dpi=72,
+                target_width_px=100,
+                max_dpi=72,
+                max_pixels=1_000_000,
+                metadata=crop_metadata,
+            )
+            asset = crops["normalized-figure"]
+            pixmap = fitz.Pixmap(root / asset)
+            self.assertAlmostEqual(pixmap.width, 612 * 641 / 1000, delta=1)
+            self.assertAlmostEqual(pixmap.height, 792 * 277 / 1000, delta=1)
+            self.assertEqual(crop_metadata["normalized-figure"]["visual_source"], "pdf-crop")
 
     def test_pdf_visual_crops_enforce_max_dpi_and_pixel_area(self) -> None:
         try:
