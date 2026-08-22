@@ -19,6 +19,17 @@ ODL_JAR="${MY_SCHOLAR_ODL_JAR:-}"
 if [[ -z "${ODL_JAR}" ]]; then
   ODL_JAR="$(zsh "${SCRIPT_DIR}/fetch-opendataloader.sh")"
 fi
+PANDOC_FETCHER="${SCRIPT_DIR}/fetch-pandoc.sh"
+if [[ ! -f "${PANDOC_FETCHER}" ]]; then
+  print -u2 "缺少 Pandoc 获取脚本：${PANDOC_FETCHER}"
+  exit 1
+fi
+PANDOC_PATH="${MY_SCHOLAR_PANDOC:-}"
+if [[ -z "${PANDOC_PATH}" ]]; then
+  PANDOC_PATH="$(zsh "${PANDOC_FETCHER}")"
+elif [[ ! -s "${BUILD_DIR}/toolchain/licenses/pandoc/COPYING.md" ]]; then
+  zsh "${PANDOC_FETCHER}" >/dev/null
+fi
 EXPECTED_ODL_SHA256="${MY_SCHOLAR_ODL_SHA256:-104a5523c812ba3a43a3c7dd6156e33f23d0e32f03ef1ac629009ef96d7a79e1}"
 JAVA_HOME_PATH="${MY_SCHOLAR_JAVA_HOME:-}"
 if [[ -z "${JAVA_HOME_PATH}" ]]; then
@@ -53,6 +64,14 @@ if ! CERTIFI_CA="$("${BUILD_PYTHON}" -c 'import certifi; print(certifi.where())'
 fi
 if [[ ! -f "${ODL_JAR}" ]]; then
   print -u2 "找不到 OpenDataLoader 转换组件：${ODL_JAR}"
+  exit 1
+fi
+if [[ ! -x "${PANDOC_PATH}" ]]; then
+  print -u2 "找不到可用的 arm64 Pandoc：${PANDOC_PATH}"
+  exit 1
+fi
+if [[ "$(file -b "${PANDOC_PATH}")" != *"Mach-O 64-bit executable arm64"* ]]; then
+  print -u2 "Pandoc 架构不是 arm64：${PANDOC_PATH}"
   exit 1
 fi
 ACTUAL_ODL_SHA256="$(shasum -a 256 "${ODL_JAR}" | awk '{print $1}')"
@@ -121,6 +140,9 @@ fi
 
 cp "${CERTIFI_CA}" "${RUNTIME_DIR}/my-scholar-server/${CA_BUNDLE_NAME}"
 cp "${ODL_JAR}" "${RUNTIME_DIR}/opendataloader-pdf-cli-0.0.0.jar"
+mkdir -p "${RUNTIME_DIR}/pandoc"
+cp "${PANDOC_PATH}" "${RUNTIME_DIR}/pandoc/pandoc"
+chmod 755 "${RUNTIME_DIR}/pandoc/pandoc"
 mkdir -p "${RUNTIME_DIR}/pdf-renderer"
 "${JAVA_HOME_PATH}/bin/javac" \
   --release 11 \
@@ -143,5 +165,7 @@ SSL_CERT_FILE="${RUNTIME_DIR}/my-scholar-server/${CA_BUNDLE_NAME}" \
   "${RUNTIME_DIR}/my-scholar-server/my-scholar-server" --dependency-smoke >/dev/null
 "${RUNTIME_DIR}/java/bin/java" -version >/dev/null 2>&1
 test -s "${RUNTIME_DIR}/my-scholar-server/${CA_BUNDLE_NAME}"
+test -x "${RUNTIME_DIR}/pandoc/pandoc"
+"${RUNTIME_DIR}/pandoc/pandoc" --version | grep -F "pandoc ${MY_SCHOLAR_PANDOC_VERSION:-3.10.2}" >/dev/null
 test -f "${RUNTIME_DIR}/pdf-renderer/MyScholarPdfRenderer.class"
 print "macOS 独立运行时已准备完成：${RUNTIME_DIR}"

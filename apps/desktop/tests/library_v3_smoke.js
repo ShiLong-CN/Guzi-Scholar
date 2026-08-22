@@ -94,6 +94,46 @@ let browserSession;
     if (homeTypography[name] > maximum) throw new Error(`Home density regressed for ${name}: ${homeTypography[name]} > ${maximum}`);
   }
 
+  const responsiveWidths = [1480, 1360, 1200, 1040, 900, 861, 860, 680, 390];
+  for (const width of responsiveWidths) {
+    await page.setViewportSize({ width, height: 900 });
+    const responsiveLayout = await page.evaluate(() => {
+      const readRect = (selector) => {
+        const node = document.querySelector(selector);
+        const rect = node?.getBoundingClientRect();
+        return rect ? { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, width: rect.width, height: rect.height } : null;
+      };
+      const buttons = ['#library-sort', '#columns-button', '#import-pdf-button'].map((selector) => {
+        const node = document.querySelector(selector);
+        const rect = node?.getBoundingClientRect();
+        const style = node ? getComputedStyle(node) : null;
+        return rect && style ? { selector, rect: { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, width: rect.width, height: rect.height }, whiteSpace: style.whiteSpace, scrollHeight: node.scrollHeight, clientHeight: node.clientHeight } : null;
+      }).filter(Boolean);
+      return {
+        main: readRect('.library-main'),
+        heading: readRect('.library-main-heading'),
+        title: readRect('#library-heading'),
+        subtitle: readRect('#library-subtitle'),
+        actions: readRect('#library-list-actions'),
+        buttons,
+        scrollWidth: document.documentElement.scrollWidth,
+        viewportWidth: window.innerWidth,
+      };
+    });
+    const title = responsiveLayout.title;
+    const subtitle = responsiveLayout.subtitle;
+    const actions = responsiveLayout.actions;
+    const main = responsiveLayout.main;
+    const buttonTops = responsiveLayout.buttons.map(({ rect }) => rect.top);
+    const buttonBottoms = responsiveLayout.buttons.map(({ rect }) => rect.bottom);
+    if (!main || !title || !subtitle || !actions || title.width < 60 || title.height > 32 || subtitle.height > 24) throw new Error(`Library heading became compressed at ${width}px (${JSON.stringify(responsiveLayout)})`);
+    if (responsiveLayout.scrollWidth > responsiveLayout.viewportWidth + 1 || actions.left < main.left - 1 || actions.right > main.right + 1) throw new Error(`Library heading overflowed at ${width}px (${JSON.stringify(responsiveLayout)})`);
+    if (responsiveLayout.buttons.some(({ rect, whiteSpace, scrollHeight, clientHeight }) => whiteSpace !== 'nowrap' || rect.height > 44 || scrollHeight > clientHeight + 1)) throw new Error(`Library toolbar text wrapped at ${width}px (${JSON.stringify(responsiveLayout.buttons)})`);
+    if (buttonTops.length && Math.max(...buttonTops) - Math.min(...buttonTops) > 1.5) throw new Error(`Library toolbar buttons no longer share a row at ${width}px (${JSON.stringify(responsiveLayout.buttons)})`);
+    if (buttonBottoms.length && Math.max(...buttonBottoms) - Math.min(...buttonBottoms) > 1.5) throw new Error(`Library toolbar buttons have mismatched heights at ${width}px (${JSON.stringify(responsiveLayout.buttons)})`);
+  }
+  await page.setViewportSize({ width: 1440, height: 900 });
+
   await page.emulateMedia({ colorScheme: 'dark' });
   await page.waitForTimeout(250);
   const darkContrasts = await page.evaluate(() => {

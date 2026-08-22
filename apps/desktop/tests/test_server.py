@@ -25,7 +25,7 @@ sys.path.insert(0, str(ROOT))
 from pipeline import PipelineError  # noqa: E402
 from library_store import LibraryStore  # noqa: E402
 import server as server_module  # noqa: E402
-from server import AI_STATUS_HISTORY_LIMIT, DataRootLock, MAX_CHAT_IMAGE_BYTES, MAX_NOTE_ASSET_BYTES, JobStore, ScholarHandler, _ai_status_history, _chat_image_context, _copy_ai_profile, _deduplicate_figure_ids, _migrate_job_artifacts, _note_image_type, _public_job, _public_settings, _record_ai_status, _runtime_lock_roots, _store_note_asset, _sync_ai_annotations, _translation_key, _translation_records, _write_content_manifest, _write_settings, _write_translation_records  # noqa: E402
+from server import AI_STATUS_HISTORY_LIMIT, DataRootLock, MAX_CHAT_IMAGE_BYTES, MAX_NOTE_ASSET_BYTES, JobStore, ReflowConflictError, ScholarHandler, _ai_status_history, _chat_image_context, _copy_ai_profile, _deduplicate_figure_ids, _migrate_job_artifacts, _note_image_type, _public_job, _public_settings, _record_ai_status, _runtime_lock_roots, _store_note_asset, _sync_ai_annotations, _translation_key, _translation_records, _write_content_manifest, _write_settings, _write_translation_records  # noqa: E402
 
 
 class PDFEvidenceWorkerTest(unittest.TestCase):
@@ -66,6 +66,348 @@ class PDFEvidenceWorkerTest(unittest.TestCase):
             writer.assert_called_once_with(source, output, drawing_pages=[1, 2])
             runtime_roots.assert_not_called()
             http_server.assert_not_called()
+
+
+class PermanentDeleteTest(unittest.TestCase):
+    @staticmethod
+    def _handler() -> tuple[ScholarHandler, list[tuple[dict, HTTPStatus]], list[tuple[str, HTTPStatus]]]:
+        handler = object.__new__(ScholarHandler)
+        responses: list[tuple[dict, HTTPStatus]] = []
+        errors: list[tuple[str, HTTPStatus]] = []
+        handler._send_json = lambda payload, status=HTTPStatus.OK, **_kwargs: responses.append((payload, status))
+        handler._send_error_json = lambda message, status=HTTPStatus.BAD_REQUEST, **_kwargs: errors.append((message, status))
+        return handler, responses, errors
+
+    @staticmethod
+    def _completed_job(root: Path) -> tuple[JobStore, LibraryStore, dict]:
+        store = JobStore(root / "jobs")
+        library = LibraryStore(root)
+        record = store.create("paper.pdf", 11)
+        job_dir = Path(record["job_dir"])
+        (job_dir / "source.pdf").write_bytes(b"%PDF-1.4\nfull-data")
+        store.update(record["job_id"], status="completed")
+        record = store.get(record["job_id"])
+        library.sync_jobs([record])
+        return store, library, record
+
+    @staticmethod
+    def _batch_handler(job_ids: list[str]) -> tuple[ScholarHandler, list[tuple[dict, HTTPStatus]], list[tuple[str, HTTPStatus]]]:
+        handler, responses, errors = PermanentDeleteTest._handler()
+        raw = json.dumps({"job_ids": job_ids}).encode("utf-8")
+        handler.headers = {"Content-Length": str(len(raw))}
+        handler.rfile = io.BytesIO(raw)
+        return handler, responses, errors
+
+    def test_permanent_delete_removes_job_directory_and_library_index(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="my-scholar-permanent-delete-") as temp:
+            store, library, record = self._completed_job(Path(temp))
+            job_id = record["job_id"]
+            job_dir = Path(record["job_dir"])
+            library.trash_item(job_id)
+            handler, responses, errors = self._handler()
+            with patch.object(server_module, "STORE", store), patch.object(server_module, "LIBRARY", library):
+                handler._permanently_delete_library_item(job_id)
+
+            self.assertEqual(errors, [])
+            self.assertEqual(responses[0][0]["deleted"], job_id)
+            self.assertFalse(job_dir.exists())
+            self.assertIsNone(store.get(job_id))
+            self.assertNotIn(job_id, library.state["items"])
+            self.assertEqual(list((Path(temp) / "jobs").glob(f".deleting-{job_id}-*")), [])
+
+    def test_permanent_delete_rejects_non_trash_and_rolls_back_directory(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="my-scholar-permanent-delete-boundary-") as temp:
+            store, library, record = self._completed_job(Path(temp))
+            job_id = record["job_id"]
+            job_dir = Path(record["job_dir"])
+            handler, responses, errors = self._handler()
+            with patch.object(server_module, "STORE", store), patch.object(server_module, "LIBRARY", library):
+                handler._permanently_delete_library_item(job_id)
+
+            self.assertEqual(responses, [])
+            self.assertEqual(errors[0][1], HTTPStatus.CONFLICT)
+            self.assertTrue(job_dir.is_dir())
+            self.assertIsNotNone(store.get(job_id))
+            self.assertIn(job_id, library.state["items"])
+
+    def test_permanent_delete_rejects_running_and_reflow_jobs_without_staging(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="my-scholar-permanent-delete-busy-") as temp:
+            store, library, record = self._completed_job(Path(temp))
+            job_id = record["job_id"]
+            job_dir = Path(record["job_dir"])
+            library.trash_item(job_id)
+            handler, responses, errors = self._handler()
+            store.update(job_id, status="running")
+            with patch.object(server_module, "STORE", store), patch.object(server_module, "LIBRARY", library):
+                handler._permanently_delete_library_item(job_id)
+            self.assertEqual(errors[0][1], HTTPStatus.CONFLICT)
+            self.assertTrue(job_dir.is_dir())
+            self.assertIsNotNone(store.get(job_id))
+
+            store.update(job_id, status="completed", reflow={}, metadata_status="retrieving")
+            errors.clear()
+            with patch.object(server_module, "STORE", store), patch.object(server_module, "LIBRARY", library):
+                handler._permanently_delete_library_item(job_id)
+            self.assertEqual(errors[0][1], HTTPStatus.CONFLICT)
+            self.assertTrue(job_dir.is_dir())
+            self.assertIsNotNone(store.get(job_id))
+
+            store.update(job_id, status="completed", reflow={"status": "running", "generation": 1})
+            errors.clear()
+            with patch.object(server_module, "STORE", store), patch.object(server_module, "LIBRARY", library):
+                handler._permanently_delete_library_item(job_id)
+            self.assertEqual(errors[0][1], HTTPStatus.CONFLICT)
+            self.assertTrue(job_dir.is_dir())
+            self.assertIsNotNone(store.get(job_id))
+
+    def test_permanent_delete_keeps_indexed_tombstone_when_final_cleanup_fails(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="my-scholar-permanent-delete-rollback-") as temp:
+            store, library, record = self._completed_job(Path(temp))
+            job_id = record["job_id"]
+            job_dir = Path(record["job_dir"])
+            library.trash_item(job_id)
+            handler, responses, errors = self._handler()
+            with patch.object(server_module, "STORE", store), patch.object(server_module, "LIBRARY", library), patch.object(
+                store, "finalize_permanent_delete", side_effect=OSError("disk full")
+            ):
+                handler._permanently_delete_library_item(job_id)
+
+            self.assertEqual(responses, [])
+            self.assertEqual(errors[0][1], HTTPStatus.CONFLICT)
+            self.assertFalse(job_dir.exists())
+            self.assertIsNone(store.get(job_id))
+            self.assertNotIn(job_id, library.state["items"])
+            self.assertIn(job_id, library.state["permanently_deleted"])
+            self.assertEqual(len(list((Path(temp) / "jobs").glob(f".deleting-{job_id}-*"))), 1)
+            self.assertTrue((Path(temp) / "jobs" / ".permanent-delete-journal.json").is_file())
+
+    def test_permanent_delete_finalize_holds_store_lock_for_shared_journal(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="my-scholar-permanent-delete-finalize-lock-") as temp:
+            store = JobStore(Path(temp) / "jobs")
+            job_id = "a" * 16
+            token = {
+                "job_id": job_id,
+                "staged_dir": str(Path(temp) / "jobs" / f".deleting-{job_id}-token"),
+            }
+            lock_state = {"entered": False}
+
+            class TrackingLock:
+                def __enter__(self):
+                    lock_state["entered"] = True
+                    return self
+
+                def __exit__(self, *_args):
+                    lock_state["entered"] = False
+
+            store.lock = TrackingLock()  # type: ignore[assignment]
+            with patch.object(store, "_remove_permanent_delete_journal", side_effect=lambda _job_id: self.assertTrue(lock_state["entered"])):
+                store.finalize_permanent_delete(token)
+
+    def test_delete_route_dispatches_permanent_action(self) -> None:
+        handler = object.__new__(ScholarHandler)
+        handler.path = f"/api/library/items/{'a' * 16}/permanent"
+        dispatched: list[str] = []
+        handler._permanently_delete_library_item = lambda job_id: dispatched.append(job_id)
+        handler.do_DELETE()
+        self.assertEqual(dispatched, ["a" * 16])
+
+    def test_permanent_delete_helper_is_readonly_safe(self) -> None:
+        handler, responses, errors = self._handler()
+        store = MagicMock()
+        library = MagicMock()
+        with patch.object(server_module, "READONLY_MODE", True), patch.object(server_module, "STORE", store), patch.object(server_module, "LIBRARY", library):
+            handler._permanently_delete_library_item("a" * 16)
+        self.assertEqual(responses, [])
+        self.assertEqual(errors, [("只读演示模式，暂不支持修改。", HTTPStatus.FORBIDDEN)])
+        store.get.assert_not_called()
+
+    def test_batch_permanent_delete_prevalidates_all_items_before_mutating(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="my-scholar-batch-permanent-delete-boundary-") as temp:
+            root = Path(temp)
+            store, library, first = self._completed_job(root / "one")
+            second = store.create("second.pdf", 12)
+            second_dir = Path(second["job_dir"])
+            (second_dir / "source.pdf").write_bytes(b"%PDF-1.4\nsecond")
+            store.update(second["job_id"], status="completed")
+            second = store.get(second["job_id"])
+            library.sync_jobs([second])
+            library.trash_item(first["job_id"])
+            handler, responses, errors = self._batch_handler([first["job_id"], second["job_id"]])
+            with patch.object(server_module, "STORE", store), patch.object(server_module, "LIBRARY", library):
+                handler._permanently_delete_library_items()
+
+            self.assertEqual(errors, [])
+            self.assertEqual(responses[0][1], HTTPStatus.CONFLICT)
+            self.assertEqual(responses[0][0]["deleted"], [])
+            self.assertEqual(responses[0][0]["failed"][0]["job_id"], second["job_id"])
+            self.assertTrue(Path(first["job_dir"]).is_dir())
+            self.assertTrue(second_dir.is_dir())
+            self.assertIn(first["job_id"], library.state["items"])
+
+    def test_batch_permanent_delete_returns_deleted_and_failed(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="my-scholar-batch-permanent-delete-") as temp:
+            root = Path(temp)
+            store, library, first = self._completed_job(root / "one")
+            second = store.create("second.pdf", 12)
+            second_dir = Path(second["job_dir"])
+            (second_dir / "source.pdf").write_bytes(b"%PDF-1.4\nsecond")
+            store.update(second["job_id"], status="completed")
+            second = store.get(second["job_id"])
+            library.sync_jobs([second])
+            library.trash_item(first["job_id"])
+            library.trash_item(second["job_id"])
+            handler, responses, errors = self._batch_handler([first["job_id"], second["job_id"]])
+            with patch.object(server_module, "STORE", store), patch.object(server_module, "LIBRARY", library):
+                handler._permanently_delete_library_items()
+
+            self.assertEqual(errors, [])
+            self.assertEqual(responses[0][1], HTTPStatus.OK)
+            self.assertEqual(responses[0][0]["deleted"], [first["job_id"], second["job_id"]])
+            self.assertEqual(responses[0][0]["failed"], [])
+            self.assertFalse(Path(first["job_dir"]).exists())
+            self.assertFalse(second_dir.exists())
+
+    def test_batch_permanent_delete_keeps_indexed_cleanup_failure_as_failed(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="my-scholar-batch-permanent-delete-partial-") as temp:
+            root = Path(temp)
+            store, library, first = self._completed_job(root / "one")
+            second = store.create("second.pdf", 12)
+            second_dir = Path(second["job_dir"])
+            (second_dir / "source.pdf").write_bytes(b"%PDF-1.4\nsecond")
+            store.update(second["job_id"], status="completed")
+            second = store.get(second["job_id"])
+            library.sync_jobs([second])
+            library.trash_item(first["job_id"])
+            library.trash_item(second["job_id"])
+            original_finalize = store.finalize_permanent_delete
+            calls = {"count": 0}
+
+            def fail_second(token: dict) -> None:
+                calls["count"] += 1
+                if calls["count"] == 2:
+                    raise OSError("disk full")
+                original_finalize(token)
+
+            handler, responses, errors = self._batch_handler([first["job_id"], second["job_id"]])
+            with patch.object(server_module, "STORE", store), patch.object(server_module, "LIBRARY", library), patch.object(
+                store, "finalize_permanent_delete", side_effect=fail_second
+            ):
+                handler._permanently_delete_library_items()
+
+            self.assertEqual(errors, [])
+            self.assertEqual(responses[0][1], HTTPStatus.MULTI_STATUS)
+            self.assertEqual(responses[0][0]["deleted"], [first["job_id"]])
+            self.assertEqual(responses[0][0]["failed"][0]["job_id"], second["job_id"])
+            self.assertFalse(Path(first["job_dir"]).exists())
+            self.assertFalse(store.get(second["job_id"]))
+            self.assertNotIn(second["job_id"], library.state["items"])
+            self.assertTrue(second_dir.parent.joinpath(".permanent-delete-journal.json").is_file())
+
+    def test_permanent_delete_recovery_cleans_prepared_journal_without_touching_original(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="my-scholar-permanent-delete-recover-prepared-") as temp:
+            root = Path(temp)
+            store, library, record = self._completed_job(root)
+            job_id = record["job_id"]
+            staged = root / "jobs" / f".deleting-{job_id}-prepared"
+            store._upsert_permanent_delete_journal({
+                "job_id": job_id,
+                "record": record,
+                "job_dir": record["job_dir"],
+                "staged_dir": str(staged),
+                "status": "prepared",
+            })
+            restarted = JobStore(root / "jobs")
+            restarted.recover_permanent_delete_journals(LibraryStore(root))
+            self.assertTrue(Path(record["job_dir"]).is_dir())
+            self.assertIsNotNone(restarted.get(job_id))
+            self.assertFalse(store.permanent_delete_journal_path.exists())
+
+    def test_permanent_delete_recovery_restores_unindexed_staged_job(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="my-scholar-permanent-delete-recover-staged-") as temp:
+            root = Path(temp)
+            store, library, record = self._completed_job(root)
+            job_id = record["job_id"]
+            library.trash_item(job_id)
+            token = store.stage_permanent_delete(job_id)
+            self.assertFalse(Path(record["job_dir"]).exists())
+            restarted = JobStore(root / "jobs")
+            restarted.recover_permanent_delete_journals(LibraryStore(root))
+            self.assertTrue(Path(record["job_dir"]).is_dir())
+            self.assertIsNotNone(restarted.get(job_id))
+            self.assertFalse(Path(token["staged_dir"]).exists())
+            self.assertFalse(store.permanent_delete_journal_path.exists())
+
+    def test_permanent_delete_recovery_finishes_indexed_staged_job(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="my-scholar-permanent-delete-recover-indexed-") as temp:
+            root = Path(temp)
+            store, library, record = self._completed_job(root)
+            job_id = record["job_id"]
+            library.trash_item(job_id)
+            token = store.stage_permanent_delete(job_id)
+            library.permanently_delete_item(job_id)
+            store._mark_permanent_delete_indexed(token)
+            restarted = JobStore(root / "jobs")
+            restarted.recover_permanent_delete_journals(LibraryStore(root))
+            self.assertFalse(Path(token["staged_dir"]).exists())
+            self.assertIsNone(restarted.get(job_id))
+            self.assertFalse(store.permanent_delete_journal_path.exists())
+
+    def test_permanent_delete_recovery_keeps_indexed_journal_when_cleanup_fails(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="my-scholar-permanent-delete-recover-retry-") as temp:
+            root = Path(temp)
+            store, library, record = self._completed_job(root)
+            job_id = record["job_id"]
+            library.trash_item(job_id)
+            token = store.stage_permanent_delete(job_id)
+            library.permanently_delete_item(job_id)
+            store._mark_permanent_delete_indexed(token)
+            restarted = JobStore(root / "jobs")
+            with patch.object(server_module.shutil, "rmtree", side_effect=OSError("disk busy")):
+                restarted.recover_permanent_delete_journals(LibraryStore(root))
+            self.assertTrue(Path(token["staged_dir"]).exists())
+            self.assertTrue(restarted.permanent_delete_journal_path.exists())
+            self.assertIsNone(restarted.get(job_id))
+            restarted.recover_permanent_delete_journals(LibraryStore(root))
+            self.assertFalse(Path(token["staged_dir"]).exists())
+            self.assertFalse(restarted.permanent_delete_journal_path.exists())
+
+    def test_permanent_delete_stage_journal_failure_restores_live_job(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="my-scholar-permanent-delete-journal-failure-") as temp:
+            root = Path(temp)
+            store, library, record = self._completed_job(root)
+            job_id = record["job_id"]
+            job_dir = Path(record["job_dir"])
+            library.trash_item(job_id)
+            calls = {"count": 0}
+            original_upsert = store._upsert_permanent_delete_journal
+
+            def fail_staged(entry: dict) -> None:
+                calls["count"] += 1
+                if calls["count"] == 2:
+                    raise OSError("journal unavailable")
+                original_upsert(entry)
+
+            handler, responses, errors = self._handler()
+            with patch.object(server_module, "STORE", store), patch.object(server_module, "LIBRARY", library), patch.object(
+                store, "_upsert_permanent_delete_journal", side_effect=fail_staged
+            ):
+                handler._permanently_delete_library_item(job_id)
+
+            self.assertEqual(responses, [])
+            self.assertEqual(errors[0][1], HTTPStatus.INTERNAL_SERVER_ERROR)
+            self.assertTrue(job_dir.is_dir())
+            self.assertIsNotNone(store.get(job_id))
+            self.assertIn(job_id, library.state["items"])
+            self.assertFalse(store.permanent_delete_journal_path.exists())
+            self.assertEqual(list((root / "jobs").glob(f".deleting-{job_id}-*")), [])
+
+    def test_post_route_dispatches_batch_permanent_action(self) -> None:
+        handler = object.__new__(ScholarHandler)
+        handler.path = "/api/library/items/permanent"
+        dispatched: list[bool] = []
+        handler._permanently_delete_library_items = lambda: dispatched.append(True)
+        handler.do_POST()
+        self.assertEqual(dispatched, [True])
 
 
 class TranslationCacheTest(unittest.TestCase):
@@ -264,6 +606,58 @@ class TranslationCacheTest(unittest.TestCase):
             self.assertIn(folder["id"], library.state["items"][record["job_id"]]["folder_ids"])
             self.assertEqual(store.get(record["job_id"])["requested_folder_ids"], [])
             self.assertIn(folder["id"], LibraryStore(data_root).state["items"][record["job_id"]]["folder_ids"])
+
+    def test_requested_folder_replay_skips_a_deleted_job(self) -> None:
+        job_id = "a" * 16
+        store = MagicMock()
+        store.get.return_value = None
+        library = MagicMock()
+        with patch.object(server_module, "STORE", store), patch.object(server_module, "LIBRARY", library):
+            warnings = server_module._apply_requested_folders({"job_id": job_id, "requested_folder_ids": ["folder-stale"]})
+
+        self.assertEqual(warnings, [])
+        library.add_to_folder.assert_not_called()
+        store.update.assert_not_called()
+
+    def test_ai_review_holds_job_mutation_lock_for_the_full_review(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="my-scholar-ai-review-lock-") as temp:
+            store = JobStore(Path(temp) / "jobs")
+            record = store.create("paper.pdf", 10)
+            job_id = record["job_id"]
+            job_dir = Path(record["job_dir"])
+            (job_dir / "manifest.json").write_text("{}", encoding="utf-8")
+            store.update(job_id, status="completed")
+            handler, responses, errors = PermanentDeleteTest._handler()
+            review_started = threading.Event()
+            release_review = threading.Event()
+
+            def slow_review(_job_dir: Path) -> dict:
+                review_started.set()
+                self.assertTrue(release_review.wait(timeout=2.0))
+                return {"status": "completed", "model": "test", "reviewed_at": "now"}
+
+            with patch.object(server_module, "STORE", store), patch.object(server_module, "review_tables", side_effect=slow_review):
+                worker = threading.Thread(target=handler._run_ai_review, args=(job_id,))
+                worker.start()
+                self.assertTrue(review_started.wait(timeout=1.0))
+                contender_acquired = threading.Event()
+
+                def contend_for_job() -> None:
+                    with server_module._job_mutation(job_id):
+                        contender_acquired.set()
+
+                contender = threading.Thread(target=contend_for_job)
+                contender.start()
+                self.assertFalse(contender_acquired.wait(timeout=0.1))
+                release_review.set()
+                worker.join(timeout=2.0)
+                contender.join(timeout=2.0)
+
+            self.assertFalse(worker.is_alive())
+            self.assertFalse(contender.is_alive())
+            self.assertTrue(contender_acquired.is_set())
+            self.assertEqual(errors, [])
+            self.assertEqual(responses[0][0]["result"]["status"], "completed")
 
     def test_only_one_worker_can_claim_and_running_recovers_as_queued(self) -> None:
         with tempfile.TemporaryDirectory(prefix="my-scholar-job-claim-") as temp:
@@ -1318,7 +1712,7 @@ class SettingsBoundaryTest(unittest.TestCase):
             for forbidden in ("base_url", "model", "api_key", "api_key_configured", "server_preset", "translation", "chat"):
                 self.assertNotIn(forbidden, public)
             self.assertEqual(public["ai"], {
-                "translation": {"base_url": "", "model": "", "api_key_configured": False},
+                "translation": {"base_url": "", "model": "", "api_key_configured": False, "mode": "qwen-mt"},
                 "chat": {"base_url": "", "model": "", "api_key_configured": False},
             })
 
@@ -1389,6 +1783,74 @@ class SettingsBoundaryTest(unittest.TestCase):
         self.assertEqual(public["ai"]["chat"]["base_url"], "https://shared.example/v1")
         self.assertTrue(public["ai"]["chat"]["api_key_configured"])
         self.assertNotIn("api_key", public["ai"]["chat"])
+
+    def test_ai_profile_reuse_normalizes_translation_mode_in_both_directions(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="my-scholar-settings-ai-reuse-mode-") as temp:
+            settings_path = Path(temp) / "settings.json"
+            settings_path.write_text(json.dumps({"ai": {
+                "translation": {
+                    "base_url": "https://translate.example/v1",
+                    "model": "translate-model",
+                    "api_key": "translate-secret",
+                    "mode": "chat",
+                },
+                "chat": {
+                    "base_url": "https://chat.example/v1",
+                    "model": "chat-model",
+                    "api_key": "chat-secret",
+                },
+            }}), encoding="utf-8")
+            with patch("server.SETTINGS_PATH", settings_path), patch("server.ai_services", return_value={}):
+                _copy_ai_profile("translation", "chat")
+                after_chat = json.loads(settings_path.read_text(encoding="utf-8"))
+                self.assertNotIn("mode", after_chat["ai"]["chat"])
+                _copy_ai_profile("chat", "translation")
+                after_translation = json.loads(settings_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(after_translation["ai"]["translation"]["mode"], "chat")
+        self.assertEqual(after_translation["ai"]["translation"]["base_url"], "https://translate.example/v1")
+        self.assertEqual(after_translation["ai"]["translation"]["api_key"], "translate-secret")
+
+    def test_ai_profile_reuse_does_not_copy_translation_mode_into_chat(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="my-scholar-settings-ai-reuse-mode-") as temp:
+            settings_path = Path(temp) / "settings.json"
+            settings_path.write_text(json.dumps({"ai": {
+                "translation": {
+                    "base_url": "https://shared.example/v1",
+                    "model": "shared-model",
+                    "api_key": "shared-secret",
+                    "mode": "chat",
+                },
+                "chat": {"base_url": "", "model": "", "api_key": ""},
+            }}), encoding="utf-8")
+            with patch("server.SETTINGS_PATH", settings_path), patch("server.ai_services", return_value={}):
+                _copy_ai_profile("translation", "chat")
+            stored = json.loads(settings_path.read_text(encoding="utf-8"))
+        self.assertNotIn("mode", stored["ai"]["chat"])
+
+    def test_ai_profile_reuse_to_translation_preserves_target_protocol_mode(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="my-scholar-settings-ai-reuse-target-mode-") as temp:
+            settings_path = Path(temp) / "settings.json"
+            settings_path.write_text(json.dumps({"ai": {
+                "chat": {
+                    "base_url": "https://shared.example/v1",
+                    "model": "shared-model",
+                    "api_key": "shared-secret",
+                },
+                "translation": {
+                    "base_url": "https://old.example/v1",
+                    "model": "old-model",
+                    "api_key": "old-secret",
+                    "mode": "chat",
+                },
+            }}), encoding="utf-8")
+            with patch("server.SETTINGS_PATH", settings_path), patch("server.ai_services", return_value={}):
+                _copy_ai_profile("chat", "translation")
+            stored = json.loads(settings_path.read_text(encoding="utf-8"))
+        self.assertEqual(stored["ai"]["translation"]["base_url"], "https://shared.example/v1")
+        self.assertEqual(stored["ai"]["translation"]["model"], "shared-model")
+        self.assertEqual(stored["ai"]["translation"]["api_key"], "shared-secret")
+        self.assertEqual(stored["ai"]["translation"]["mode"], "chat")
 
     def test_model_list_endpoint_uses_current_profile_and_returns_ids_only(self) -> None:
         handler = object.__new__(ScholarHandler)

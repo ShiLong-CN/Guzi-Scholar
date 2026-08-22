@@ -2,7 +2,7 @@
 
 My Scholar 是一个本地优先的跨平台学术 PDF 阅读器。它把 PDF 转成连续阅读的 HTML，并在同一个桌面应用中提供文献管理、元数据检索、翻译、标注、笔记和文章问答。
 
-当前版本为 `0.1.2`，是一个面向单用户本地部署的开源版本。PDF、译文、笔记、标注、设置和 AI 配置默认保存在本机，不需要注册账号或连接远程用户服务。
+当前版本为 `0.1.4`，是一个面向单用户本地部署的开源版本。PDF、译文、笔记、标注、设置和 AI 配置默认保存在本机，不需要注册账号或连接远程用户服务。
 
 ## 主要功能
 
@@ -32,7 +32,7 @@ My Scholar 是一个本地优先的跨平台学术 PDF 阅读器。它把 PDF �
 | Poppler (`pdfinfo`, `pdftoppm`) | 页数识别、页图和高分辨率裁剪 | 推荐 |
 | MinerU 或匹配的 content-list sidecar | 版面感知语义转换 | 可选 |
 | Java 11+ 与 OpenDataLoader PDF CLI | MinerU 不可用时的转换回退 | 可选 |
-| Pandoc | LaTeX 转 MathML | 可选 |
+| Pandoc | LaTeX 转 MathML | 可选（macOS 安装版内置） |
 | PyMuPDF (`fitz`) | PDF 元数据和视觉裁剪 | 可选 |
 | Playwright | 浏览器交互回归测试 | 仅测试需要 |
 

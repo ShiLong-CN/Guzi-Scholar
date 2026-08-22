@@ -187,6 +187,43 @@ class LibraryStoreTest(unittest.TestCase):
         with self.assertRaises(LibraryValidationError):
             self.store.delete_view("view-all")
 
+    def test_permanent_delete_requires_trash_and_supports_transaction_rollback(self) -> None:
+        job_id = "a" * 16
+        with self.assertRaisesRegex(LibraryValidationError, "只能彻底清除回收站"):
+            self.store.permanently_delete_item(job_id)
+
+        trashed = self.store.trash_item(job_id)
+        removed = self.store.permanently_delete_item(job_id)
+        self.assertEqual(removed, trashed)
+        self.assertNotIn(job_id, self.store.state["items"])
+
+        restored = self.store.restore_deleted_item(job_id, removed)
+        self.assertEqual(restored, removed)
+        self.assertIn(job_id, self.store.state["items"])
+        with self.assertRaises(LibraryValidationError):
+            self.store.restore_deleted_item(job_id, removed)
+
+    def test_tombstone_blocks_stale_sync_and_library_mutations(self) -> None:
+        job_id = "a" * 16
+        self.store.trash_item(job_id)
+        removed = self.store.permanently_delete_item(job_id)
+        self.assertNotIn(job_id, self.store.state["items"])
+
+        # A delayed worker may still publish its old job record. It must not
+        # recreate either the item or a partial folder membership.
+        self.store.sync_jobs([{**self.jobs[0], "updated_at": "2099-01-01"}])
+        self.assertNotIn(job_id, self.store.state["items"])
+        with self.assertRaisesRegex(LibraryValidationError, "彻底清除"):
+            self.store.update_item(job_id, {"progress": {"percent": 20}})
+        folder = self.store.create_folder("迟到任务")
+        with self.assertRaisesRegex(LibraryValidationError, "彻底清除"):
+            self.store.add_to_folder(job_id, folder["id"])
+
+        # Rollback removes the tombstone and makes the original item writable.
+        self.store.restore_deleted_item(job_id, removed)
+        self.assertIn(job_id, self.store.state["items"])
+        self.store.update_item(job_id, {"progress": {"percent": 20}})
+
     def test_bibliographic_metadata_user_edits_are_locked_against_auto_merge(self) -> None:
         job_id = "a" * 16
         self.store.update_metadata(job_id, {"fields": {"title": "我的标题", "year": 2025}})

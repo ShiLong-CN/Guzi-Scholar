@@ -19,6 +19,7 @@ sys.path.insert(0, str(ROOT))
 from ai_gateway import (  # noqa: E402
     RequestLimiter,
     _SameOriginRedirectHandler,
+    _sanitize_messages,
     _sanitize_request_body,
     build_handler,
     probe_profiles,
@@ -197,6 +198,26 @@ class AIGatewayTest(unittest.TestCase):
             units,
             len(json.dumps(clean, ensure_ascii=False, separators=(",", ":")).encode("utf-8")),
         )
+
+    def test_translation_message_shapes_follow_configured_mode(self) -> None:
+        qwen = _sanitize_messages("translation", [{"role": "user", "content": "hello"}])
+        self.assertEqual(qwen[0]["role"], "user")
+        chat = _sanitize_messages(
+            "translation",
+            [{"role": "system", "content": "Translate only."}, {"role": "user", "content": "hello"}],
+            translation_mode="chat",
+        )
+        self.assertEqual([item["role"] for item in chat], ["system", "user"])
+        with self.assertRaisesRegex(AccountError, "system"):
+            _sanitize_messages("translation", [{"role": "user", "content": "hello"}], translation_mode="chat")
+
+    def test_translation_budget_has_its_own_shared_ceiling(self) -> None:
+        clean, _units = _sanitize_request_body(
+            "translation",
+            {"messages": [{"role": "system", "content": "Translate only."}, {"role": "user", "content": "hello"}], "max_tokens": 99999},
+            translation_mode="chat",
+        )
+        self.assertEqual(clean["max_tokens"], 8192)
 
     def test_oversized_or_nested_provider_controls_are_rejected(self) -> None:
         with self.assertRaisesRegex(AccountError, "response_format"):

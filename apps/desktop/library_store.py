@@ -75,6 +75,7 @@ def _default_state() -> Dict[str, Any]:
         ],
         "display": _default_display(),
         "items": {},
+        "permanently_deleted": [],
         "views": [
             {"id": "view-all", "name": "全部文献", "filters": [], "sort_by": "updated_at", "sort_direction": "desc", "system": True, "created_at": now},
             {"id": "view-unread", "name": "未开始", "filters": [{"field": "reading_status", "operator": "equals", "value": "未开始"}], "sort_by": "updated_at", "sort_direction": "desc", "system": True, "created_at": now},
@@ -234,6 +235,14 @@ class LibraryStore:
             for item in state["items"].values():
                 if isinstance(item, dict):
                     item["metadata"] = LibraryStore._normalize_metadata(item.get("metadata"))
+        deleted_ids = []
+        for value in _as_list(raw.get("permanently_deleted")):
+            value = str(value or "").strip().lower()
+            if value and value not in deleted_ids and len(value) <= 40:
+                deleted_ids.append(value)
+        state["permanently_deleted"] = deleted_ids
+        for job_id in deleted_ids:
+            state["items"].pop(job_id, None)
         state["updated_at"] = str(raw.get("updated_at") or state["updated_at"])
         # Keep the system records present even if an older build omitted one.
         folder_ids = {str(item.get("id")) for item in state["folders"] if isinstance(item, dict)}
@@ -366,6 +375,12 @@ class LibraryStore:
             for job in jobs:
                 job_id = str(job.get("job_id") or "").strip()
                 if not job_id:
+                    continue
+                if job_id in self.state.get("permanently_deleted", []):
+                    # A stale worker or GET snapshot must not recreate an item
+                    # after its artifacts and metadata were permanently removed.
+                    if self.state["items"].pop(job_id, None) is not None:
+                        changed = True
                     continue
                 item = self.state["items"].get(job_id)
                 if not isinstance(item, dict):
@@ -644,6 +659,8 @@ class LibraryStore:
 
     def update_item(self, job_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         with self.lock:
+            if str(job_id or "").strip() in self.state.get("permanently_deleted", []):
+                raise LibraryValidationError("文献已被彻底清除。")
             item = self.state["items"].get(job_id)
             if not isinstance(item, dict):
                 item = self._job_defaults({"job_id": job_id})
@@ -676,10 +693,14 @@ class LibraryStore:
         folder_id = str(folder_id or "").strip()
         if not folder_id or folder_id in SYSTEM_FOLDER_IDS:
             with self.lock:
+                if str(job_id or "").strip() in self.state.get("permanently_deleted", []):
+                    raise LibraryValidationError("文献已被彻底清除。")
                 item = self.state["items"].get(job_id)
                 return copy.deepcopy(item) if isinstance(item, dict) else self._job_defaults({"job_id": job_id})
         with self.lock:
             self._find_folder(folder_id)
+            if str(job_id or "").strip() in self.state.get("permanently_deleted", []):
+                raise LibraryValidationError("文献已被彻底清除。")
             item = self.state["items"].get(job_id)
             if not isinstance(item, dict):
                 item = self._job_defaults({"job_id": job_id})
@@ -866,6 +887,57 @@ class LibraryStore:
             item["updated_at"] = utc_now()
             self._save_locked()
             return copy.deepcopy(item)
+
+    def permanently_delete_item(self, job_id: str) -> Dict[str, Any]:
+        """Remove one trashed item from the metadata index.
+
+        The job directory is owned by :class:`server.JobStore`; this method
+        only changes ``library.json`` so the caller can coordinate both stores
+        and roll the index back if artifact cleanup fails.
+        """
+        with self.lock:
+            item = self.state["items"].get(job_id)
+            if not isinstance(item, dict):
+                raise LibraryValidationError("文献不存在。")
+            if not item.get("deleted_at"):
+                raise LibraryValidationError("只能彻底清除回收站中的文献。")
+            removed = copy.deepcopy(item)
+            del self.state["items"][job_id]
+            tombstones = self.state.setdefault("permanently_deleted", [])
+            if job_id not in tombstones:
+                tombstones.append(job_id)
+            try:
+                self._save_locked()
+            except Exception:
+                self.state["items"][job_id] = item
+                if job_id in tombstones:
+                    tombstones.remove(job_id)
+                raise
+            return removed
+
+    def restore_deleted_item(self, job_id: str, item: Dict[str, Any]) -> Dict[str, Any]:
+        """Restore an index entry after a failed permanent-delete transaction."""
+        if not isinstance(item, dict):
+            raise LibraryValidationError("文献索引恢复数据无效。")
+        with self.lock:
+            if job_id in self.state["items"]:
+                raise LibraryValidationError("文献索引恢复冲突。")
+            self.state["items"][job_id] = copy.deepcopy(item)
+            tombstones = self.state.setdefault("permanently_deleted", [])
+            if job_id in tombstones:
+                tombstones.remove(job_id)
+            try:
+                self._save_locked()
+            except Exception:
+                self.state["items"].pop(job_id, None)
+                if job_id not in tombstones:
+                    tombstones.append(job_id)
+                raise
+            return copy.deepcopy(self.state["items"][job_id])
+
+    def is_permanently_deleted(self, job_id: str) -> bool:
+        with self.lock:
+            return str(job_id or "").strip() in self.state.get("permanently_deleted", [])
 
     def create_view(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         name = str(payload.get("name") or "").strip()

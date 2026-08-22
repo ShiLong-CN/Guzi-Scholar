@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       publish_release:
-        description: Publish the rebuilt macOS artifact as a Preview GitHub Release
+        description: Publish the rebuilt macOS artifact as a stable GitHub Release (ad-hoc macOS package)
         required: true
         default: false
         type: boolean
@@ -60,7 +60,7 @@ jobs:
         if: github.event_name != 'workflow_dispatch' || inputs.publish_release != true
         run: npm --prefix apps/desktop run dist:mac:internal
 
-      - name: Build ad-hoc macOS Preview package
+      - name: Build ad-hoc macOS release package
         if: github.event_name == 'workflow_dispatch' && inputs.publish_release == true
         run: npm --prefix apps/desktop run dist:mac:internal
       - name: Verify packaged runtime boundary
@@ -73,7 +73,7 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Manually publish one macOS Preview Release
+    name: Manually publish one macOS stable Release
     if: github.event_name == 'workflow_dispatch' && inputs.publish_release == true
     needs: [macos]
     runs-on: ubuntu-latest
@@ -96,22 +96,22 @@ jobs:
       - name: Generate SHA-256 checksums
         working-directory: release
         run: sha256sum * > SHA256SUMS
-      - name: Write Preview release notes
+      - name: Write release notes
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
           cat > release-notes.md <<EOF
-          ## macOS Preview
+          ## macOS Apple Silicon
 
-          Guzi Scholar ${RELEASE_TAG} is an internal macOS Apple Silicon preview package.
+          Guzi Scholar ${RELEASE_TAG} is the stable GitHub release for the validated macOS Apple Silicon package.
 
           - This DMG uses ad-hoc signing and has not been signed with an Apple Developer ID or notarized by Apple.
           - On first launch, macOS may show a Gatekeeper warning. In Finder, right-click **谷子学术.app**, choose **Open**, and confirm the prompt.
-          - The app does not promise reliable automatic replacement. Use the **Releases** page to download and install preview updates manually.
+          - The app does not promise reliable automatic replacement. Use the **Releases** page to download and install updates manually.
           - Windows packages are not included until real-machine validation is complete.
           EOF
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.release_tag }}
-        run: gh release create "$RELEASE_TAG" release/* --repo "${GITHUB_REPOSITORY}" --verify-tag --prerelease --notes-file release-notes.md --title "Guzi Scholar $RELEASE_TAG Preview"
+        run: gh release create "$RELEASE_TAG" release/* --repo "${GITHUB_REPOSITORY}" --verify-tag --notes-file release-notes.md --title "Guzi Scholar $RELEASE_TAG"

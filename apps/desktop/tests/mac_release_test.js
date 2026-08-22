@@ -15,8 +15,10 @@ const expectedResourceDestinations = [
   'licenses/Guzi-Scholar-LICENSE',
   'licenses/Guzi-Scholar-NOTICE.md',
   'licenses/opendataloader-pdf',
+  'licenses/pandoc',
   'python-server',
   'toolchain/opendataloader-pdf-cli-0.0.0.jar',
+  'toolchain/pandoc',
   'toolchain/pdf-renderer',
 ];
 
@@ -70,7 +72,7 @@ assert.strictEqual(manifest.build?.productName, '谷子学术');
 assert.strictEqual(manifest.build?.directories?.output, 'dist/mac.noindex');
 assert.strictEqual(manifest.build?.mac?.extendInfo?.CFBundleDisplayName, '谷子学术');
 assert.strictEqual(manifest.build?.mac?.extendInfo?.CFBundleName, '谷子学术');
-assert.strictEqual(manifest.version, '0.1.3');
+assert.strictEqual(manifest.version, '0.1.4');
 assert.strictEqual(manifest.build?.afterPack, 'scripts/after-pack.cjs');
 assert.match(manifest.scripts?.['pack:mac'] || '', /prepare:mac/u);
 assert.match(manifest.scripts?.['dist:mac'] || '', /prepare:mac/u);
@@ -119,11 +121,12 @@ assert.match(releaseWorkflow, /format\('refs\/tags\/\{0\}', inputs\.release_tag\
 assert.match(releaseWorkflow, /gh release create[\s\S]*--verify-tag/u, 'manual publishing must refuse to synthesize a missing tag');
 assert.match(releaseWorkflow, /Verify packaged runtime boundary[\s\S]*mac_release_test\.js/u);
 assert.match(releaseWorkflow, /Build internal macOS package[\s\S]*dist:mac:internal/u, 'tag builds must remain internal');
-assert.match(releaseWorkflow, /Build ad-hoc macOS Preview package[\s\S]*inputs\.publish_release[\s\S]*dist:mac:internal/u, 'manual publishing must build the ad-hoc Preview target');
-assert.doesNotMatch(releaseWorkflow, /MACOS_CSC_LINK|APPLE_APP_SPECIFIC_PASSWORD|APPLE_TEAM_ID/u, 'Preview publishing must not require Apple signing or notarization secrets');
-assert.match(releaseWorkflow, /gh release create[\s\S]*--prerelease[\s\S]*--notes-file release-notes\.md/u, 'Preview releases must be marked pre-release and include explicit notes');
-assert.match(releaseWorkflow, /ad-hoc signing[\s\S]*notarized by Apple/u, 'Preview notes must disclose the signing and notarization status');
-assert.match(releaseWorkflow, /Gatekeeper[\s\S]*right-click \*\*谷子学术\.app\*\*[\s\S]*Open/u, 'Preview notes must include the first-launch Gatekeeper guidance');
+assert.match(releaseWorkflow, /Build ad-hoc macOS release package[\s\S]*inputs\.publish_release[\s\S]*dist:mac:internal/u, 'manual publishing must build the ad-hoc release target');
+assert.doesNotMatch(releaseWorkflow, /MACOS_CSC_LINK|APPLE_APP_SPECIFIC_PASSWORD|APPLE_TEAM_ID/u, 'GitHub release publishing must not imply Apple signing or notarization secrets');
+assert.match(releaseWorkflow, /gh release create[\s\S]*--verify-tag[\s\S]*--notes-file release-notes\.md[\s\S]*--title "Guzi Scholar \$RELEASE_TAG"/u, 'stable releases must be verified-tag releases with explicit notes');
+assert.doesNotMatch(releaseWorkflow, /gh release create[\s\S]*--prerelease/u, 'v0.1.4 GitHub releases must not be marked pre-release');
+assert.match(releaseWorkflow, /stable GitHub release[\s\S]*ad-hoc signing[\s\S]*notarized by Apple/u, 'release notes must disclose the signing and notarization status');
+assert.match(releaseWorkflow, /Gatekeeper[\s\S]*right-click \*\*谷子学术\.app\*\*[\s\S]*Open/u, 'release notes must include the first-launch Gatekeeper guidance');
 assert.match(releaseWorkflow, /certifi==2025\.8\.3/u);
 assert.doesNotMatch(releaseWorkflow, /^  windows:/mu, 'Windows packaging must remain disabled until its runtime is self-contained');
 
@@ -137,12 +140,15 @@ assert.match(prepareMacSource, /--exclude-module fitz/u);
 assert.match(prepareMacSource, /--exclude-module pymupdf/u);
 assert.match(prepareMacSource, /--release 11/u);
 assert.match(prepareMacSource, /--dependency-smoke/u);
+assert.match(prepareMacSource, /fetch-pandoc\.sh/u);
+assert.match(prepareMacSource, /PANDOC_FETCHER[\s\S]*-f[\s\S]*PANDOC_FETCHER/u);
+assert.match(prepareMacSource, /RUNTIME_DIR\}\/pandoc\/pandoc/u);
 
 const mainSource = fs.readFileSync(path.join(root, 'electron', 'main.cjs'), 'utf8');
 assert.match(mainSource, /app\.setName\(PRODUCT_NAME\)/u);
 assert.match(mainSource, /!app\.isPackaged[\s\S]*\$\{defaultUserDataPath\}-development/u);
 assert.match(mainSource, /app\.isPackaged[\s\S]*python-server[\s\S]*my-scholar-server/u);
-assert.match(mainSource, /packagedToolchainEnvironment[\s\S]*MY_SCHOLAR_ODL_JAR[\s\S]*MY_SCHOLAR_JAVA[\s\S]*MY_SCHOLAR_PDF_RENDERER_CLASSPATH/u);
+assert.match(mainSource, /packagedToolchainEnvironment[\s\S]*MY_SCHOLAR_ODL_JAR[\s\S]*MY_SCHOLAR_PANDOC[\s\S]*MY_SCHOLAR_JAVA[\s\S]*MY_SCHOLAR_PDF_RENDERER_CLASSPATH/u);
 assert.match(mainSource, /python-server[\s\S]*ca-certificates\.crt[\s\S]*SSL_CERT_FILE: caBundle/u);
 assert.match(mainSource, /stats\.isFile\(\) && stats\.size > 0/u);
 assert.match(mainSource, /MY_SCHOLAR_PROJECT_ROOT: projectRoot/u);
@@ -176,18 +182,25 @@ if (packagedApp) {
   );
   assert.deepStrictEqual(forbidden, [], `the default app bundle contains managed runtime/model files: ${forbidden.join(', ')}`);
   const packagedBytes = walkFiles(packagedAppRoot).reduce((total, relative) => total + fs.lstatSync(path.join(packagedAppRoot, relative)).size, 0);
-  assert.ok(packagedBytes <= 512 * 1024 * 1024, `the default app bundle exceeded the 512 MiB size budget (${packagedBytes} bytes)`);
+  assert.ok(packagedBytes <= 768 * 1024 * 1024, `the default app bundle exceeded the 768 MiB size budget (${packagedBytes} bytes)`);
 
   const java = path.join(resourcesRoot, 'java', 'bin', 'java');
   const server = path.join(resourcesRoot, 'python-server', 'my-scholar-server');
   const caBundle = path.join(resourcesRoot, 'python-server', 'ca-certificates.crt');
   const odlJar = path.join(resourcesRoot, 'toolchain', 'opendataloader-pdf-cli-0.0.0.jar');
+  const pandoc = path.join(resourcesRoot, 'toolchain', 'pandoc', 'pandoc');
   const renderer = path.join(resourcesRoot, 'toolchain', 'pdf-renderer');
   const actualOdlSha = crypto.createHash('sha256').update(fs.readFileSync(odlJar)).digest('hex');
   assert.strictEqual(actualOdlSha, '104a5523c812ba3a43a3c7dd6156e33f23d0e32f03ef1ac629009ef96d7a79e1');
-  for (const executable of [path.join(packagedAppRoot, 'Contents', 'MacOS', '谷子学术'), server, java]) {
+  assert.ok(fs.statSync(pandoc).isFile(), 'bundled Pandoc must be present');
+  assert.ok(fs.statSync(path.join(resourcesRoot, 'licenses', 'pandoc', 'COPYING.md')).isFile(), 'Pandoc license must be present');
+  for (const executable of [path.join(packagedAppRoot, 'Contents', 'MacOS', '谷子学术'), server, java, pandoc]) {
     assert.match(runChecked('/usr/bin/file', [executable]).stdout, /arm64/u, `${executable} is not arm64`);
   }
+  const pandocRun = runChecked(pandoc, ['--from=markdown+tex_math_dollars+tex_math_single_backslash', '--to=html5', '--mathml'], {
+    input: '$$\n\\pmb { H } _ { l } ^ { \\prime } = \\mathrm { M S A } \\tag{1}\n$$\n',
+  });
+  assert.match(pandocRun.stdout, /<math\b/u, 'bundled Pandoc must produce MathML');
   const modules = runChecked(java, ['--list-modules']).stdout;
   for (const module of ['java.base', 'java.compiler', 'java.desktop', 'java.management', 'java.sql']) {
     assert.match(modules, new RegExp(`^${module}@`, 'mu'), `bundled Java is missing ${module}`);

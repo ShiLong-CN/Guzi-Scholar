@@ -155,6 +155,13 @@ let browserSession;
   if ((await page.locator('.ai-service-card').count()) !== 2) throw new Error('Settings did not render both AI service status cards');
   if (await page.locator('#setting-translation-base-url,#setting-chat-base-url,#setting-translation-api-key,#setting-chat-api-key,#setting-translation-model,#setting-chat-model').count() !== 6) throw new Error('User AI credential fields are missing from settings');
   if ((await page.locator('#setting-translation-api-key').getAttribute('type')) !== 'password' || (await page.locator('#setting-chat-api-key').getAttribute('type')) !== 'password') throw new Error('AI keys were not rendered as password fields');
+  if (await page.locator('#setting-translation-clear-key[type="checkbox"],#setting-chat-clear-key[type="checkbox"]').count()) throw new Error('AI key clearing still uses an accidental checkbox control');
+  if (await page.locator('#setting-translation-clear-key,#setting-chat-clear-key').count() !== 2) throw new Error('AI key clear buttons are missing');
+  const translationProtocolStyle = await page.locator('#setting-translation-mode').evaluate((node) => {
+    const style = getComputedStyle(node);
+    return { borderRadius: style.borderRadius, minHeight: Number.parseFloat(style.minHeight), fontSize: Number.parseFloat(style.fontSize) };
+  });
+  if (translationProtocolStyle.borderRadius !== '8px' || translationProtocolStyle.minHeight < 40 || translationProtocolStyle.fontSize < 12) throw new Error(`Translation protocol select did not use the settings control style (${JSON.stringify(translationProtocolStyle)})`);
   if ((await page.locator('#settings-ai').textContent()).match(/translation-smoke|chat-smoke/)) throw new Error('Settings leaked model parameters into the AI service cards');
   const settingsStructure = await page.locator('#settings-view').evaluate((view) => {
     const form = view.querySelector('.settings-product-form');
@@ -358,7 +365,7 @@ let browserSession;
   if (await translationKey.inputValue() !== '' || await chatKey.inputValue() !== '') throw new Error('Saved AI keys were echoed back into password inputs');
   if (!/已配置/u.test(await translationKey.getAttribute('placeholder')) || !/已配置/u.test(await chatKey.getAttribute('placeholder'))) throw new Error('Configured AI key state was not exposed without revealing the secret');
   const clearSave = page.waitForResponse((response) => response.url().endsWith('/api/settings') && response.request().method() === 'POST' && response.ok() && response.request().postDataJSON()?.ai?.translation?.clear_api_key === true);
-  await page.locator('#setting-translation-clear-key').check();
+  await page.locator('#setting-translation-clear-key').click();
   await clearSave;
   await page.waitForFunction(() => document.querySelector('#settings-save-status')?.dataset.state === 'saved');
   if (settingsAI.translation.api_key_configured) throw new Error('Clearing the translation API key did not update persisted state');

@@ -22,7 +22,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Dict, Mapping, Optional
 from urllib.parse import urlsplit
 
-from mineru_discovery import MineruCandidate, discover_mineru
+from mineru_discovery import MineruCandidate, clear_discovery_cache, discover_mineru
 
 
 CATALOG_SCHEMA_VERSION = 1
@@ -684,6 +684,7 @@ class ComponentManager:
             "source": candidate.source,
             "version": candidate.version,
         })
+        clear_discovery_cache()
         return candidate
 
     def clear_external(self, component: str) -> bool:
@@ -693,6 +694,7 @@ class ComponentManager:
         existed = pointer.is_file()
         if existed:
             pointer.unlink()
+            clear_discovery_cache()
         return existed
 
     def manifest_for(self, component: str) -> Optional[ComponentManifest]:

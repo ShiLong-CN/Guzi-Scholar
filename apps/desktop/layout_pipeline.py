@@ -848,9 +848,10 @@ class MathRenderer:
                 rendered = ""
         if not rendered:
             cls = "math-display" if display else "math-inline"
+            fallback_tex = self._pandoc_tex(tex_for_mathml)
             rendered = (
-                f'<span class="{cls} math-fallback" data-tex="{html.escape(source_tex, quote=True)}">'
-                f"<code>{_safe_inline(tex)}</code></span>"
+                f'<span class="{cls} math-fallback" data-tex="{html.escape(fallback_tex, quote=True)}">'
+                f"<code>{_safe_inline(fallback_tex)}</code></span>"
             )
             self.modes[key] = "fallback"
         else:

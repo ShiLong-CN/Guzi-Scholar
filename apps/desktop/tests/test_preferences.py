@@ -107,6 +107,7 @@ class ConfigResolutionTest(unittest.TestCase):
             mode = stat.S_IMODE(path.stat().st_mode)
         self.assertEqual(translation["base_url"], "http://translation.test/v1")
         self.assertEqual(translation["model"], "qwen-mt-test")
+        self.assertEqual(translation["mode"], "qwen-mt")
         self.assertEqual(chat["base_url"], "http://chat.test/v1")
         self.assertEqual(chat["model"], "chat-test")
         self.assertNotEqual(translation["profile_id"], chat["profile_id"])
@@ -125,6 +126,18 @@ class ConfigResolutionTest(unittest.TestCase):
             changed_model = resolve({"base_url": "http://translation.test/v1", "api_key": "key-b", "model": "model-b"})
         self.assertEqual(first["profile_id"], rotated_key["profile_id"])
         self.assertNotEqual(first["profile_id"], changed_model["profile_id"])
+
+    def test_translation_profile_id_depends_on_protocol_mode(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="my-scholar-config-mode-") as temp:
+            path = Path(temp) / "developer.tokens.json"
+            environ = {DEVELOPER_TOKENS_FILE_ENV: str(path), SETTINGS_FILE_ENV: str(Path(temp) / "missing-settings.json")}
+            payload = {"base_url": "http://translation.test/v1", "api_key": "key", "model": "model", "mode": "qwen-mt"}
+            path.write_text(json.dumps({"translation": payload}), encoding="utf-8")
+            qwen = resolve_ai_profile("translation", environ=environ)
+            payload["mode"] = "chat"
+            path.write_text(json.dumps({"translation": payload}), encoding="utf-8")
+            chat = resolve_ai_profile("translation", environ=environ)
+        self.assertNotEqual(qwen["profile_id"], chat["profile_id"])
 
     def test_missing_or_malformed_tokens_are_disabled(self) -> None:
         with tempfile.TemporaryDirectory(prefix="my-scholar-config-") as temp:

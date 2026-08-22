@@ -18,13 +18,16 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable, Mapping
 from urllib.parse import urlsplit
 
-from config import AI_SERVICES, resolve_ai_profile
+from config import AI_SERVICES, AI_TRANSLATION_MODES, DEFAULT_TRANSLATION_MODE, resolve_ai_profile
 from user_service import AccountError, AccountStore
 
 
 MAX_BODY_BYTES = 8 * 1024 * 1024
 MAX_MESSAGES = 24
+# Must match the desktop translation adapter's hard generation ceiling.
+# Conversational callers still send their own lower explicit budget.
 MAX_OUTPUT_TOKENS = 4096
+MAX_TRANSLATION_OUTPUT_TOKENS = 8192
 MAX_TRANSLATION_TEXT_CHARS = 200_000
 MAX_CHAT_TEXT_CHARS = 400_000
 MAX_CHAT_IMAGE_DATA_CHARS = 7 * 1024 * 1024
@@ -101,11 +104,24 @@ def _sanitize_translation_options(value: Any) -> dict[str, Any]:
     return result
 
 
-def _sanitize_messages(service: str, messages: Any) -> list[dict[str, Any]]:
+def _translation_mode(profile: Mapping[str, Any] | None) -> str:
+    candidate = str((profile or {}).get("mode", DEFAULT_TRANSLATION_MODE) or "").strip().lower()
+    return candidate if candidate in AI_TRANSLATION_MODES else DEFAULT_TRANSLATION_MODE
+
+
+def _output_token_limit(service: str, translation_mode: str = DEFAULT_TRANSLATION_MODE) -> int:
+    return MAX_TRANSLATION_OUTPUT_TOKENS if service == "translation" else MAX_OUTPUT_TOKENS
+
+
+def _sanitize_messages(service: str, messages: Any, *, translation_mode: str = DEFAULT_TRANSLATION_MODE) -> list[dict[str, Any]]:
     if not isinstance(messages, list) or not messages or len(messages) > MAX_MESSAGES:
         raise AccountError(f"messages 必须是 1-{MAX_MESSAGES} 项的数组。")
-    if service == "translation" and len(messages) != 1:
-        raise AccountError("翻译请求只能包含一条消息。")
+    if service == "translation":
+        if translation_mode == "chat":
+            if len(messages) != 2 or [str(item.get("role", "")) for item in messages if isinstance(item, dict)] != ["system", "user"]:
+                raise AccountError("通用翻译请求必须包含一条 system 消息和一条 user 消息。")
+        elif len(messages) != 1:
+            raise AccountError("专用翻译请求只能包含一条 user 消息。")
     clean: list[dict[str, Any]] = []
     text_chars = 0
     image_count = 0
@@ -113,7 +129,8 @@ def _sanitize_messages(service: str, messages: Any) -> list[dict[str, Any]]:
         if not isinstance(message, dict):
             raise AccountError("messages 中的每一项都必须是对象。")
         role = str(message.get("role", ""))
-        if role not in ({"user"} if service == "translation" else {"system", "user", "assistant"}):
+        allowed_roles = {"system", "user"} if service == "translation" and translation_mode == "chat" else ({"user"} if service == "translation" else {"system", "user", "assistant"})
+        if role not in allowed_roles:
             raise AccountError("消息角色无效。")
         content = message.get("content")
         if isinstance(content, str):
@@ -177,10 +194,10 @@ def _sanitize_response_format(value: Any) -> dict[str, str]:
     return {"type": "json_object"}
 
 
-def _sanitize_request_body(service: str, body: Any) -> tuple[dict[str, Any], int]:
+def _sanitize_request_body(service: str, body: Any, *, translation_mode: str = DEFAULT_TRANSLATION_MODE) -> tuple[dict[str, Any], int]:
     if not isinstance(body, dict):
         raise AccountError("AI 请求必须是 JSON 对象。")
-    clean: dict[str, Any] = {"messages": _sanitize_messages(service, body.get("messages"))}
+    clean: dict[str, Any] = {"messages": _sanitize_messages(service, body.get("messages"), translation_mode=translation_mode)}
     numeric_fields = {
         "temperature": (0.0, 2.0),
         "top_p": (0.0, 1.0),
@@ -205,14 +222,16 @@ def _sanitize_request_body(service: str, body: Any) -> tuple[dict[str, Any], int
             if isinstance(value, bool):
                 raise AccountError(f"{token_field} 参数无效。")
             try:
-                clean[token_field] = max(1, min(MAX_OUTPUT_TOKENS, int(value)))
+                clean[token_field] = max(1, min(_output_token_limit(service, translation_mode), int(value)))
             except (TypeError, ValueError) as exc:
                 raise AccountError(f"{token_field} 参数无效。") from exc
     if "response_format" in body:
         clean["response_format"] = _sanitize_response_format(body["response_format"])
     if "stop" in body:
         clean["stop"] = _sanitize_stop(body["stop"])
-    if service == "translation" and "translation_options" in body:
+    if service == "translation" and translation_mode == "chat" and "translation_options" in body:
+        raise AccountError("通用翻译请求不支持 translation_options。")
+    if service == "translation" and translation_mode == "qwen-mt" and "translation_options" in body:
         clean["translation_options"] = _sanitize_translation_options(body["translation_options"])
     encoded = json.dumps(clean, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     return clean, max(1, len(encoded))
@@ -300,7 +319,7 @@ def _open_provider(
     try:
         return open_body(outbound)
     except urllib.error.HTTPError as exc:
-        retryable = service == "chat" and exc.code in {400, 422} and (
+        retryable = exc.code in {400, 422} and (
             "response_format" in outbound or "chat_template_kwargs" in outbound
         )
         exc.close()
@@ -327,14 +346,21 @@ def probe_profiles(
         if not _configured(profile):
             results[service] = {"ok": False, "error": "not_configured"}
             continue
-        messages = [{"role": "user", "content": "Connection test. Reply only OK."}]
+        messages = (
+            [
+                {"role": "system", "content": "You are a translation engine. Return only the translation."},
+                {"role": "user", "content": "<source_text>\nConnection test.\n</source_text>"},
+            ]
+            if service == "translation" and _translation_mode(profile) == "chat"
+            else [{"role": "user", "content": "Connection test. Reply only OK."}]
+        )
         outbound: dict[str, Any] = {
             "model": str(profile["model"]),
             "messages": messages,
             "stream": False,
             "max_tokens": 8,
         }
-        if service == "translation":
+        if service == "translation" and _translation_mode(profile) == "qwen-mt":
             outbound["translation_options"] = {"source_lang": "auto", "target_lang": "Chinese"}
         else:
             outbound["chat_template_kwargs"] = {"enable_thinking": False}
@@ -407,7 +433,7 @@ def build_handler(
                 body = json.loads(self.rfile.read(length).decode("utf-8"))
             except (UnicodeDecodeError, json.JSONDecodeError) as exc:
                 raise AccountError("AI 请求必须是有效 JSON。") from exc
-            return _sanitize_request_body(service, body)
+            return _sanitize_request_body(service, body, translation_mode=_translation_mode(profiles.get(service)))
 
         def do_GET(self) -> None:  # noqa: N802 - stdlib handler API
             if self.path != "/health":
@@ -473,8 +499,8 @@ def build_handler(
                     upstream_body["model"] = str(profile["model"])
                     upstream_body["stream"] = body.get("stream") is True
                     if "max_tokens" not in upstream_body and "max_completion_tokens" not in upstream_body:
-                        upstream_body["max_tokens"] = MAX_OUTPUT_TOKENS
-                    if service == "chat":
+                        upstream_body["max_tokens"] = _output_token_limit(service, _translation_mode(profile))
+                    if service == "chat" or (service == "translation" and _translation_mode(profile) == "chat"):
                         upstream_body["chat_template_kwargs"] = {"enable_thinking": False}
 
                     response = _open_provider(

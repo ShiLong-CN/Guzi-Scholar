@@ -30,6 +30,8 @@ AI_GATEWAY_MODELS = {
     "chat": "qwen3.8-max-preview",
 }
 AI_SERVICES = ("translation", "chat")
+AI_TRANSLATION_MODES = ("qwen-mt", "chat")
+DEFAULT_TRANSLATION_MODE = "qwen-mt"
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -63,24 +65,29 @@ def settings_path(environ: Optional[Mapping[str, Any]] = None) -> Path:
     return (Path(data_root).expanduser() if data_root else PROJECT_ROOT / "data") / "settings.json"
 
 
-def _profile_id(base_url: str, model: str) -> str:
+def _profile_id(base_url: str, model: str, mode: str = "") -> str:
     if not (base_url and model):
         return ""
-    material = f"{base_url.rstrip('/')}\n{model}"
+    material = f"{base_url.rstrip('/')}\n{model}\n{mode}"
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
-def _normalize_profile(value: Any) -> dict[str, str]:
+def _normalize_profile(value: Any, *, service: str = "chat") -> dict[str, str]:
     if not isinstance(value, Mapping):
-        return {"base_url": "", "api_key": "", "model": "", "profile_id": ""}
+        value = {}
     base_url = str(value.get("base_url", "") or "").strip().rstrip("/")
     api_key = str(value.get("api_key", "") or "").strip()
     model = str(value.get("model", "") or "").strip()
+    mode = ""
+    if service == "translation":
+        candidate = str(value.get("mode", DEFAULT_TRANSLATION_MODE) or "").strip().lower()
+        mode = candidate if candidate in AI_TRANSLATION_MODES else DEFAULT_TRANSLATION_MODE
     return {
         "base_url": base_url,
         "api_key": api_key,
         "model": model,
-        "profile_id": _profile_id(base_url, model),
+        **({"mode": mode} if service == "translation" else {}),
+        "profile_id": _profile_id(base_url, model, mode),
     }
 
 
@@ -90,7 +97,7 @@ def _user_profile(name: str, environ: Mapping[str, Any]) -> Optional[dict[str, s
     if not isinstance(profiles, Mapping) or name not in profiles:
         return None
     # A present profile, even when incomplete, is an explicit user choice.
-    return _normalize_profile(profiles.get(name))
+    return _normalize_profile(profiles.get(name), service=name)
 
 
 def _explicit_gateway_profile(name: str, environ: Mapping[str, Any]) -> Optional[dict[str, str]]:
@@ -101,7 +108,10 @@ def _explicit_gateway_profile(name: str, environ: Mapping[str, Any]) -> Optional
     key_key = f"MY_SCHOLAR_AI_{name.upper()}_API_KEY"
     model = str(environ.get(model_key, AI_GATEWAY_MODELS[name]) or "").strip()
     api_key = str(environ.get(key_key, environ.get("MY_SCHOLAR_AI_API_KEY", "")) or "").strip()
-    return _normalize_profile({"base_url": f"{base}/{name}/v1", "api_key": api_key, "model": model})
+    value: dict[str, Any] = {"base_url": f"{base}/{name}/v1", "api_key": api_key, "model": model}
+    if name == "translation":
+        value["mode"] = environ.get("MY_SCHOLAR_AI_TRANSLATION_MODE", DEFAULT_TRANSLATION_MODE)
+    return _normalize_profile(value, service=name)
 
 
 def resolve_ai_profile(
@@ -125,7 +135,7 @@ def resolve_ai_profile(
 
     raw = _read_developer_tokens(developer_tokens_path(env))
     profile = raw.get(name) if isinstance(raw.get(name), Mapping) else {}
-    return _normalize_profile(profile)
+    return _normalize_profile(profile, service=name)
 
 
 __all__ = [
@@ -134,6 +144,8 @@ __all__ = [
     "AI_GATEWAY_URL_DEFAULT",
     "AI_GATEWAY_URL_ENV",
     "AI_SERVICES",
+    "AI_TRANSLATION_MODES",
+    "DEFAULT_TRANSLATION_MODE",
     "DEVELOPER_TOKENS_FILE_ENV",
     "DEVELOPER_TOKENS_PATH",
     "PROJECT_ROOT",

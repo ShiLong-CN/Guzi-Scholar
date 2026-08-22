@@ -266,6 +266,19 @@ let browserSession;
   if (await page.locator('#graph-similarity-threshold, #graph-similarity-threshold-value, .graph-threshold-control').count()) throw new Error('面向用户的相似度阈值控件仍然存在');
   if (await page.locator('#library-graph-canvas canvas').count() < 1) throw new Error('Cytoscape 画布没有创建');
   if ((await page.locator('.graph-drag-hint').textContent()).trim() !== '拖动节点整理关系 · 悬浮文献查看完整标题') throw new Error('图谱缺少节点拖动与标题悬浮提示');
+  const graphPointerIsolation = await page.evaluate(() => {
+    const canvas = document.querySelector('#library-graph-canvas');
+    if (!canvas) return { marquee: false, selectedRows: 0 };
+    const init = { bubbles: true, cancelable: true, pointerId: 91, pointerType: 'mouse', button: 0, clientX: 180, clientY: 180 };
+    canvas.dispatchEvent(new PointerEvent('pointerdown', init));
+    document.dispatchEvent(new PointerEvent('pointermove', { ...init, clientX: 520, clientY: 420 }));
+    document.dispatchEvent(new PointerEvent('pointerup', { ...init, clientX: 520, clientY: 420 }));
+    return {
+      marquee: Boolean(document.querySelector('.library-selection-marquee')),
+      selectedRows: document.querySelectorAll('.library-row.is-selected').length,
+    };
+  });
+  if (graphPointerIsolation.marquee || graphPointerIsolation.selectedRows) throw new Error(`图谱拖动事件泄漏到列表框选：${JSON.stringify(graphPointerIsolation)}`);
   const lightBackground = await page.locator('.graph-stage').evaluate((node) => getComputedStyle(node).backgroundImage);
   if (!lightBackground.includes('gradient')) throw new Error('浅色主题图谱背景没有应用');
 

@@ -556,10 +556,64 @@ async function waitForLibrary(page) {
     }, { id: firstId, folder: folderId });
     if (await page.locator('#reader-view.active-view').count()) throw new Error('长按拖拽文献时意外打开了阅读器。');
 
-    // 9. Command/Ctrl-click selects multiple rows; the context menu exposes
-    // batch actions for the current selection.
+    // 9. Finder-style marquee selection selects multiple rows, and clicking
+    // the empty list canvas clears the selection.
     await page.locator('[data-library-folder="system-all"]').click();
     await waitForLibrary(page);
+    if (await page.locator('#library-multi-select-button, #library-selection-tools, #recent-list [data-library-select]').count()) throw new Error('旧的显式多选控件仍然存在。');
+    const selectionList = page.locator('#recent-list');
+    const selectionListBox = await selectionList.boundingBox();
+    const selectionFirstBox = await row(firstId).boundingBox();
+    const selectionLastBox = await row(lastId).boundingBox();
+    if (!selectionListBox || !selectionFirstBox || !selectionLastBox) throw new Error('无法测量框选区域。');
+    const selectionStart = { x: selectionListBox.x + 18, y: selectionLastBox.y + selectionLastBox.height + 60 };
+    const selectionEnd = { x: selectionListBox.x + Math.max(220, selectionListBox.width - 28), y: selectionFirstBox.y + selectionFirstBox.height / 2 };
+    if (selectionStart.y >= selectionListBox.y + selectionListBox.height) throw new Error('列表没有提供可用的空白框选区域。');
+
+    // A quick drag that starts on a row should enter marquee selection; the
+    // long-press folder gesture remains reserved for a stationary pointer.
+    await page.mouse.move(selectionFirstBox.x + 40, selectionFirstBox.y + selectionFirstBox.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(selectionLastBox.x + 40, selectionLastBox.y + selectionLastBox.height / 2, { steps: 12 });
+    if (await page.locator('.library-selection-marquee').count() !== 1) throw new Error('从文献行开始拖拽时没有显示选择框。');
+    await page.waitForTimeout(180);
+    await page.mouse.up();
+    if (await selectedRows().count() < 2) throw new Error('从文献行开始框选没有选中多篇文献。');
+    await page.mouse.click(selectionStart.x, selectionStart.y);
+    if (await selectedRows().count() !== 0) throw new Error('行内框选后的空白点击没有清空选择。');
+
+    // Keep the pointer up delayed long enough to exercise the native click
+    // that follows pointer capture; it must not clear the completed selection.
+    await page.mouse.move(selectionStart.x, selectionStart.y);
+    await page.mouse.down();
+    await page.mouse.move(selectionEnd.x, selectionEnd.y, { steps: 12 });
+    if (await page.locator('.library-selection-marquee').count() !== 1) throw new Error('拖拽时没有显示选择框。');
+    await page.waitForTimeout(180);
+    await page.mouse.up();
+    if (await selectedRows().count() < 2) throw new Error('框选没有选中多篇文献。');
+    await page.mouse.click(selectionStart.x, selectionStart.y);
+    if (await selectedRows().count() !== 0) throw new Error('点击列表空白处没有清空框选结果。');
+
+    // The whole library column is a Finder-style selection surface.  A drag
+    // that starts below the list (the empty column canvas) must still reach
+    // the rows above it, rather than requiring the pointer to start in
+    // #recent-list itself.
+    const librarySurface = page.locator('#library-view .library-main');
+    const librarySurfaceBox = await librarySurface.boundingBox();
+    const listSurfaceBox = await page.locator('#library-list-surface').boundingBox();
+    if (!librarySurfaceBox || !listSurfaceBox) throw new Error('无法测量整列框选区域。');
+    const outsideStartY = Math.max(listSurfaceBox.y + listSurfaceBox.height + 24, librarySurfaceBox.y + 24);
+    if (outsideStartY >= librarySurfaceBox.y + librarySurfaceBox.height - 8) throw new Error('列表下方没有可用的整列空白框选区域。');
+    const outsideStart = { x: librarySurfaceBox.x + 22, y: outsideStartY };
+    const outsideEnd = { x: Math.max(outsideStart.x + 220, librarySurfaceBox.x + librarySurfaceBox.width - 28), y: selectionFirstBox.y + selectionFirstBox.height / 2 };
+    await page.mouse.move(outsideStart.x, outsideStart.y);
+    await page.mouse.down();
+    await page.mouse.move(outsideEnd.x, outsideEnd.y, { steps: 12 });
+    if (await page.locator('.library-selection-marquee').count() !== 1) throw new Error('从列表下方空白列开始拖拽时没有显示选择框。');
+    await page.mouse.up();
+    if (await selectedRows().count() < 2) throw new Error('从列表下方空白列开始框选没有选中多篇文献。');
+    await page.mouse.click(outsideStart.x, outsideStart.y);
+    if (await selectedRows().count() !== 0) throw new Error('点击列表下方空白列没有清空框选结果。');
     await rowBody(firstId).click();
     await page.keyboard.down('Meta');
     await rowBody(secondId).click();
@@ -589,6 +643,9 @@ async function waitForLibrary(page) {
       columnSettingsPreserveWidth: true,
       columnResizePersistence: true,
       longPressFolderDrag: true,
+      marqueeRowStart: true,
+      marqueeDelayedRelease: true,
+      marqueeOutsideListSurface: true,
       multiSelectionContextMenu: true,
       errors,
     }));
